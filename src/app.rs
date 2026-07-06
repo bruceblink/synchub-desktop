@@ -4,7 +4,8 @@ use crate::config::{
     load_settings, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
 };
 use crate::models::{
-    CliConfig, FileNode, SyncConflict, WorkspaceSnapshot, format_bytes, workspace_metrics,
+    CliConfig, FileNode, SyncConflict, WorkspaceSnapshot, conflict_resolution_label, format_bytes,
+    workspace_metrics,
 };
 use crate::theme::{ThemeColors, alpha};
 use gpui::prelude::*;
@@ -358,6 +359,65 @@ impl SyncHubDesktop {
                                     format!("loaded {} pending conflicts", this.conflicts.len());
                             }
                             Err(error) => this.message = format!("load conflicts failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn resolve_conflict(
+        &mut self,
+        conflict_id: String,
+        resolution: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before resolving conflicts", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(&config.server_url)?;
+                    let resolved = client
+                        .resolve_conflict(&config.tokens.access_token, &conflict_id, resolution)
+                        .await?;
+                    let conflicts = client
+                        .list_conflicts(&config.tokens.access_token, 100)
+                        .await?;
+                    Ok::<(CliConfig, SyncConflict, Vec<SyncConflict>), anyhow::Error>((
+                        config,
+                        resolved,
+                        conflicts.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, resolved, conflicts)) => {
+                                this.cli_config = Some(config);
+                                this.conflicts = conflicts;
+                                this.message = format!(
+                                    "resolved {} as {}",
+                                    resolved.path,
+                                    conflict_resolution_label(resolution)
+                                );
+                            }
+                            Err(error) => {
+                                this.message = format!("resolve conflict failed: {error}")
+                            }
                         }
                         cx.notify();
                     });
@@ -829,6 +889,12 @@ impl SyncHubDesktop {
 
     fn render_conflicts(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let conflict_rows = self
+            .conflicts
+            .iter()
+            .map(|conflict| self.render_conflict_row(conflict, cx).into_any_element())
+            .collect::<Vec<_>>();
+
         v_flex()
             .size_full()
             .bg(colors.bg)
@@ -856,11 +922,7 @@ impl SyncHubDesktop {
                     .border_1()
                     .border_color(colors.border)
                     .rounded_md()
-                    .children(
-                        self.conflicts
-                            .iter()
-                            .map(|conflict| self.render_conflict_row(conflict)),
-                    ),
+                    .children(conflict_rows),
             )
     }
 
@@ -1077,8 +1139,15 @@ impl SyncHubDesktop {
             .child(self.render_status_badge(format!("v{}", file.version).as_str()))
     }
 
-    fn render_conflict_row(&self, conflict: &SyncConflict) -> impl IntoElement {
+    fn render_conflict_row(
+        &self,
+        conflict: &SyncConflict,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = self.colors;
+        let keep_local_id = conflict.id.clone();
+        let keep_remote_id = conflict.id.clone();
+        let keep_both_id = conflict.id.clone();
         h_flex()
             .gap_3()
             .items_center()
@@ -1110,6 +1179,43 @@ impl SyncHubDesktop {
                     .text_color(colors.muted),
             )
             .child(self.render_status_badge(conflict.resolution.as_str()))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new(format!("keep-local-{}", conflict.id))
+                            .icon(IconName::HardDrive)
+                            .label("Local")
+                            .ghost()
+                            .small()
+                            .disabled(self.loading)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.resolve_conflict(keep_local_id.clone(), "keep_local", cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("keep-remote-{}", conflict.id))
+                            .icon(IconName::Globe)
+                            .label("Remote")
+                            .ghost()
+                            .small()
+                            .disabled(self.loading)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.resolve_conflict(keep_remote_id.clone(), "keep_remote", cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("keep-both-{}", conflict.id))
+                            .icon(IconName::Copy)
+                            .label("Both")
+                            .ghost()
+                            .small()
+                            .disabled(self.loading)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.resolve_conflict(keep_both_id.clone(), "keep_both", cx)
+                            })),
+                    ),
+            )
     }
 
     fn render_metric_tile(

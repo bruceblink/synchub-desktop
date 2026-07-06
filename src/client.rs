@@ -1,6 +1,6 @@
 use crate::models::{
-    ApiEnvelope, ApiStatus, CliConfig, FileListData, LoginData, SyncConflictListData, TokenPair,
-    is_success_code,
+    ApiEnvelope, ApiStatus, CliConfig, FileListData, LoginData, SyncConflict, SyncConflictListData,
+    TokenPair, is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -85,6 +85,22 @@ impl SyncHubClient {
         let path = format!("/api/v1/sync/conflicts?resolution=pending&limit={}", limit);
         self.request_json(Method::GET, &path, Some(access_token), None)
             .await
+    }
+
+    pub async fn resolve_conflict(
+        &self,
+        access_token: &str,
+        conflict_id: &str,
+        resolution: &str,
+    ) -> Result<SyncConflict> {
+        let path = format!("/api/v1/sync/conflicts/{}", conflict_id);
+        self.request_json(
+            Method::PATCH,
+            &path,
+            Some(access_token),
+            Some(json!({ "resolution": resolution })),
+        )
+        .await
     }
 
     async fn request_empty(

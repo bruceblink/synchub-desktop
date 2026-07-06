@@ -264,6 +264,16 @@ pub fn format_bytes(size: i64) -> String {
     }
 }
 
+pub fn conflict_resolution_label(resolution: &str) -> &'static str {
+    match resolution {
+        "pending" => "pending",
+        "keep_local" => "keep local",
+        "keep_remote" => "keep remote",
+        "keep_both" => "keep both",
+        _ => "unknown",
+    }
+}
+
 pub fn is_success_code(code: &serde_json::Value) -> bool {
     match code {
         serde_json::Value::Null => true,

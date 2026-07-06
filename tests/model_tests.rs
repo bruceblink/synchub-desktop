@@ -1,7 +1,7 @@
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::models::{
-    Manifest, ManifestEntry, WorkspaceRegistryEntry, WorkspaceSnapshot, format_bytes,
-    is_success_code, workspace_metrics,
+    Manifest, ManifestEntry, WorkspaceRegistryEntry, WorkspaceSnapshot, conflict_resolution_label,
+    format_bytes, is_success_code, workspace_metrics,
 };
 
 #[test]
@@ -60,4 +60,13 @@ fn api_success_codes_match_synchub_envelope() {
 fn bytes_are_human_readable() {
     assert_eq!(format_bytes(512), "512 B");
     assert_eq!(format_bytes(2048), "2.0 KB");
+}
+
+#[test]
+fn conflict_resolution_labels_are_human_readable() {
+    assert_eq!(conflict_resolution_label("pending"), "pending");
+    assert_eq!(conflict_resolution_label("keep_local"), "keep local");
+    assert_eq!(conflict_resolution_label("keep_remote"), "keep remote");
+    assert_eq!(conflict_resolution_label("keep_both"), "keep both");
+    assert_eq!(conflict_resolution_label("other"), "unknown");
 }
