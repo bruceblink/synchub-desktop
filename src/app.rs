@@ -1,0 +1,1103 @@
+use crate::client::{SyncHubClient, refresh_cli_config_if_needed};
+use crate::config::{
+    DesktopSettings, default_cli_config_path, default_workspace_registry_path, load_cli_config,
+    load_settings, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
+};
+use crate::models::{
+    CliConfig, FileNode, SyncConflict, WorkspaceSnapshot, format_bytes, workspace_metrics,
+};
+use crate::theme::{ThemeColors, alpha};
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::{
+    Icon, IconName, TitleBar,
+    button::*,
+    input::{Input, InputState},
+    label::Label,
+    scroll::ScrollableElement,
+    *,
+};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MainView {
+    Overview,
+    Files,
+    Conflicts,
+    Daemon,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthMode {
+    Login,
+    Register,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CommandResult {
+    ok: bool,
+    summary: String,
+    output: String,
+}
+
+pub struct SyncHubDesktop {
+    server_input: Entity<InputState>,
+    email_input: Entity<InputState>,
+    password_input: Entity<InputState>,
+    workspace_input: Entity<InputState>,
+    settings: DesktopSettings,
+    cli_config_path: PathBuf,
+    registry_path: PathBuf,
+    cli_config: Option<CliConfig>,
+    workspaces: Vec<WorkspaceSnapshot>,
+    selected_workspace: usize,
+    api_status: Option<String>,
+    files: Vec<FileNode>,
+    conflicts: Vec<SyncConflict>,
+    active_view: MainView,
+    auth_mode: AuthMode,
+    loading: bool,
+    message: String,
+    command_result: Option<CommandResult>,
+    colors: ThemeColors,
+}
+
+impl SyncHubDesktop {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let settings = load_settings();
+        let server_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Server URL")
+                .default_value(settings.server_url.clone())
+        });
+        let email_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email"));
+        let password_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
+        let workspace_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace path"));
+
+        let cli_config_path = default_cli_config_path();
+        let registry_path = default_workspace_registry_path(&cli_config_path);
+        let mut app = Self {
+            server_input,
+            email_input,
+            password_input,
+            workspace_input,
+            settings,
+            cli_config_path,
+            registry_path,
+            cli_config: None,
+            workspaces: Vec::new(),
+            selected_workspace: 0,
+            api_status: None,
+            files: Vec::new(),
+            conflicts: Vec::new(),
+            active_view: MainView::Overview,
+            auth_mode: AuthMode::Login,
+            loading: false,
+            message: String::new(),
+            command_result: None,
+            colors: ThemeColors::default(),
+        };
+        app.reload_local_state(window, cx);
+        app
+    }
+
+    fn current_server(&self, cx: &App) -> String {
+        self.server_input.read(cx).value().to_string()
+    }
+
+    fn current_workspace(&self) -> Option<&WorkspaceSnapshot> {
+        self.workspaces.get(self.selected_workspace)
+    }
+
+    fn set_message(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.message = message.into();
+        cx.notify();
+    }
+
+    fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
+        self.loading = loading;
+        cx.notify();
+    }
+
+    fn reload_local_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cli_config = match load_cli_config(&self.cli_config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                self.message = format!("read login config failed: {error}");
+                None
+            }
+        };
+        if let Some(config) = &self.cli_config {
+            self.server_input.update(cx, |input, cx| {
+                input.set_value(config.server_url.clone(), window, cx);
+            });
+            self.settings.server_url = config.server_url.clone();
+        }
+        self.workspaces = match load_workspace_snapshots(&self.registry_path) {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                self.message = format!("read workspace registry failed: {error}");
+                Vec::new()
+            }
+        };
+        if self.selected_workspace >= self.workspaces.len() {
+            self.selected_workspace = 0;
+        }
+        if let Some(workspace) = self.current_workspace() {
+            let root = workspace.root_path().display().to_string();
+            self.workspace_input.update(cx, |input, cx| {
+                input.set_value(root, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_local_state(window, cx);
+        self.refresh_api(cx);
+        self.refresh_files(cx);
+        self.refresh_conflicts(cx);
+    }
+
+    fn refresh_api(&mut self, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = async {
+                let client = SyncHubClient::new(server)?;
+                client.ready().await
+            }
+            .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    match result {
+                        Ok(status) => {
+                            this.api_status = Some(if status.status.is_empty() {
+                                "ready".to_string()
+                            } else {
+                                status.status
+                            });
+                            this.message = "API is ready".to_string();
+                        }
+                        Err(error) => {
+                            this.api_status = Some("unreachable".to_string());
+                            this.message = format!("API check failed: {error}");
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn authenticate(&mut self, mode: AuthMode, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        let email = self.email_input.read(cx).value().to_string();
+        let password = self.password_input.read(cx).value().to_string();
+        let config_path = self.cli_config_path.clone();
+        self.auth_mode = mode;
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = async {
+                let client = SyncHubClient::new(&server)?;
+                let data = match mode {
+                    AuthMode::Login => client.login(&email, &password).await?,
+                    AuthMode::Register => client.register(&email, &password).await?,
+                };
+                let now = SystemTime::now();
+                let cfg = CliConfig {
+                    server_url: client.base_url().to_string(),
+                    user: data.user,
+                    access_token_expires_at: Some(rfc3339_from_system_time(
+                        data.tokens.access_token_expires_at(now),
+                    )),
+                    updated_at: Some(rfc3339_from_system_time(now)),
+                    tokens: data.tokens,
+                };
+                save_cli_config(&config_path, &cfg)?;
+                Ok::<CliConfig, anyhow::Error>(cfg)
+            }
+            .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    match result {
+                        Ok(config) => {
+                            let email = config.user.email.clone();
+                            this.cli_config = Some(config);
+                            this.message = format!("signed in as {email}");
+                        }
+                        Err(error) => this.message = format!("auth failed: {error}"),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn logout(&mut self, cx: &mut Context<Self>) {
+        let config = self.cli_config.clone();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = async {
+                if let Some(config) = &config {
+                    if !config.tokens.refresh_token.trim().is_empty() {
+                        let client = SyncHubClient::new(&config.server_url)?;
+                        let _ = client.logout(&config.tokens.refresh_token).await;
+                    }
+                }
+                remove_cli_config(&config_path)
+            }
+            .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    match result {
+                        Ok(()) => {
+                            this.cli_config = None;
+                            this.files.clear();
+                            this.conflicts.clear();
+                            this.message = "signed out".to_string();
+                        }
+                        Err(error) => this.message = format!("logout failed: {error}"),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = async {
+                let changed = refresh_cli_config_if_needed(&mut config).await?;
+                if changed {
+                    save_cli_config(&config_path, &config)?;
+                }
+                let client = SyncHubClient::new(&config.server_url)?;
+                let data = client.list_files(&config.tokens.access_token, 100).await?;
+                Ok::<(CliConfig, Vec<FileNode>), anyhow::Error>((config, data.items))
+            }
+            .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    match result {
+                        Ok((config, files)) => {
+                            this.cli_config = Some(config);
+                            this.files = files;
+                            this.message = format!("loaded {} remote files", this.files.len());
+                        }
+                        Err(error) => this.message = format!("load files failed: {error}"),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_conflicts(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = async {
+                let changed = refresh_cli_config_if_needed(&mut config).await?;
+                if changed {
+                    save_cli_config(&config_path, &config)?;
+                }
+                let client = SyncHubClient::new(&config.server_url)?;
+                let data = client.list_conflicts(&config.tokens.access_token, 100).await?;
+                Ok::<(CliConfig, Vec<SyncConflict>), anyhow::Error>((config, data.items))
+            }
+            .await;
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    match result {
+                        Ok((config, conflicts)) => {
+                            this.cli_config = Some(config);
+                            this.conflicts = conflicts;
+                            this.message = format!("loaded {} pending conflicts", this.conflicts.len());
+                        }
+                        Err(error) => this.message = format!("load conflicts failed: {error}"),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn run_daemon_command(&mut self, action: &str, cx: &mut Context<Self>) {
+        let workspace_root = self
+            .current_workspace()
+            .map(|workspace| workspace.root_path())
+            .unwrap_or_else(|| PathBuf::from(self.workspace_input.read(cx).value().as_ref()));
+        let config_path = self.cli_config_path.clone();
+        let action = action.to_string();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = tokio::task::spawn_blocking(move || {
+                run_synchub_cli_daemon(&action, &workspace_root, &config_path)
+            })
+            .await
+            .unwrap_or_else(|error| CommandResult {
+                ok: false,
+                summary: format!("daemon command failed: {error}"),
+                output: String::new(),
+            });
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    this.command_result = Some(result.clone());
+                    this.message = result.summary.clone();
+                    if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                        this.workspaces = workspaces;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn init_workspace(&mut self, cx: &mut Context<Self>) {
+        let root = self.workspace_input.read(cx).value().to_string();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, mut cx| async move {
+            let result = tokio::task::spawn_blocking(move || {
+                run_synchub_cli_workspace_init(&root, &config_path)
+            })
+            .await
+            .unwrap_or_else(|error| CommandResult {
+                ok: false,
+                summary: format!("workspace init failed: {error}"),
+                output: String::new(),
+            });
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(&mut cx, |this, cx| {
+                    this.loading = false;
+                    this.command_result = Some(result.clone());
+                    this.message = result.summary.clone();
+                    if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                        this.workspaces = workspaces;
+                        this.selected_workspace = this.workspaces.len().saturating_sub(1);
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn save_server(&mut self, cx: &mut Context<Self>) {
+        self.settings.server_url = self.current_server(cx);
+        match save_settings(&self.settings) {
+            Ok(()) => self.set_message("server saved", cx),
+            Err(error) => self.set_message(format!("save settings failed: {error}"), cx),
+        }
+    }
+
+    fn render_auth_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let signed_in = self.cli_config.is_some();
+        v_flex()
+            .gap_3()
+            .p_4()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.panel)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(Icon::new(IconName::Cloud).text_color(colors.accent))
+                    .child(Label::new("SyncHub Desktop").text_color(colors.text).text_size(rems(1.1)))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("refresh-all")
+                            .icon(IconName::RefreshCw)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.refresh_all(window, cx))),
+                    )
+                    .when(signed_in, |this| {
+                        this.child(
+                            Button::new("logout")
+                                .icon(IconName::LogOut)
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| this.logout(cx))),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(px(280.)).child(Input::new(&self.server_input)))
+                    .child(
+                        Button::new("save-server")
+                            .icon(IconName::Save)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.save_server(cx))),
+                    )
+                    .child(
+                        Button::new("check-api")
+                            .icon(IconName::Activity)
+                            .label("Ready")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_api(cx))),
+                    )
+                    .child(self.render_status_badge(self.api_status.as_deref().unwrap_or("unchecked"))),
+            )
+            .when(!signed_in, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().w(px(220.)).child(Input::new(&self.email_input)))
+                        .child(div().w(px(180.)).child(Input::new(&self.password_input)))
+                        .child(
+                            Button::new("login")
+                                .icon(IconName::LogIn)
+                                .label("Login")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| this.authenticate(AuthMode::Login, cx))),
+                        )
+                        .child(
+                            Button::new("register")
+                                .icon(IconName::UserPlus)
+                                .label("Register")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| this.authenticate(AuthMode::Register, cx))),
+                        ),
+                )
+            })
+            .when(signed_in, |this| {
+                let label = self
+                    .cli_config
+                    .as_ref()
+                    .map(|config| format!("{} via {}", config.user.email, config.server_url))
+                    .unwrap_or_default();
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Icon::new(IconName::User).small().text_color(colors.success))
+                        .child(Label::new(label).text_color(colors.muted)),
+                )
+            })
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        v_flex()
+            .w(px(280.))
+            .h_full()
+            .border_r_1()
+            .border_color(colors.border)
+            .bg(colors.panel_alt)
+            .child(
+                h_flex()
+                    .p_3()
+                    .items_center()
+                    .justify_between()
+                    .child(Label::new("Workspaces").text_color(colors.text))
+                    .child(
+                        Button::new("reload-workspaces")
+                            .icon(IconName::RefreshCw)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.reload_local_state(window, cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .px_3()
+                    .pb_3()
+                    .gap_2()
+                    .child(Input::new(&self.workspace_input))
+                    .child(
+                        Button::new("init-workspace")
+                            .icon(IconName::FolderPlus)
+                            .label("Init")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.init_workspace(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .children(self.workspaces.iter().enumerate().map(|(index, workspace)| {
+                        let selected = index == self.selected_workspace;
+                        let metrics = workspace_metrics(workspace);
+                        let title = workspace.display_name();
+                        let remote = workspace.remote_path();
+                        let root = workspace.root_path().display().to_string();
+                        v_flex()
+                            .id(("workspace", index))
+                            .mx_2()
+                            .mb_2()
+                            .p_3()
+                            .gap_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if selected { colors.accent } else { colors.border })
+                            .bg(if selected { alpha(colors.accent, 0.08) } else { colors.panel })
+                            .cursor_pointer()
+                            .hover(|style| style.border_color(colors.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected_workspace = index;
+                                this.active_view = MainView::Overview;
+                                cx.notify();
+                            }))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(Icon::new(IconName::Folder).small().text_color(colors.accent))
+                                    .child(Label::new(title).text_color(colors.text)),
+                            )
+                            .child(Label::new(remote).text_color(colors.muted).text_size(rems(0.78)))
+                            .child(Label::new(root).text_color(colors.muted).text_size(rems(0.72)))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .mt_1()
+                                    .child(self.render_tiny_metric("files", metrics.manifest_files))
+                                    .child(self.render_tiny_metric("trash", metrics.trash_entries)),
+                            )
+                    })),
+            )
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        h_flex()
+            .h(px(42.))
+            .gap_1()
+            .px_3()
+            .items_center()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.panel)
+            .child(self.render_nav_button("overview", MainView::Overview, IconName::LayoutDashboard, "Overview", cx))
+            .child(self.render_nav_button("files", MainView::Files, IconName::Files, "Files", cx))
+            .child(self.render_nav_button("conflicts", MainView::Conflicts, IconName::GitPullRequest, "Conflicts", cx))
+            .child(self.render_nav_button("daemon", MainView::Daemon, IconName::Radio, "Daemon", cx))
+    }
+
+    fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.active_view {
+            MainView::Overview => self.render_overview(cx).into_any_element(),
+            MainView::Files => self.render_files(cx).into_any_element(),
+            MainView::Conflicts => self.render_conflicts(cx).into_any_element(),
+            MainView::Daemon => self.render_daemon(cx).into_any_element(),
+        }
+    }
+
+    fn render_overview(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let metrics = self
+            .current_workspace()
+            .map(workspace_metrics)
+            .unwrap_or_default();
+        v_flex()
+            .size_full()
+            .gap_4()
+            .p_4()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(self.render_metric_tile("Manifest files", metrics.manifest_files.to_string(), IconName::Files, colors.accent))
+                    .child(self.render_metric_tile("Remote tracked", metrics.remote_tracked.to_string(), IconName::Cloud, colors.success))
+                    .child(self.render_metric_tile("Local only", metrics.local_only.to_string(), IconName::HardDrive, colors.warning))
+                    .child(self.render_metric_tile("Trash", metrics.trash_entries.to_string(), IconName::Archive, colors.danger)),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .child(Label::new("Workspace").text_color(colors.text).text_size(rems(1.0)))
+                    .child(self.render_workspace_detail()),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .child(Label::new("Last action").text_color(colors.text).text_size(rems(1.0)))
+                    .child(Label::new(if self.message.is_empty() { "Ready" } else { &self.message }).text_color(colors.muted))
+                    .when_some(self.command_result.as_ref(), |this, result| {
+                        this.child(Label::new(result.output.as_str()).text_color(colors.muted).text_size(rems(0.78)))
+                    }),
+            )
+    }
+
+    fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        v_flex()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .p_3()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("Remote Files").text_color(colors.text))
+                    .child(
+                        Button::new("load-files")
+                            .icon(IconName::RefreshCw)
+                            .label("Load")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_files(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .mx_3()
+                    .mb_3()
+                    .overflow_y_scrollbar()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .children(self.files.iter().map(|file| self.render_file_row(file))),
+            )
+    }
+
+    fn render_conflicts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        v_flex()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .p_3()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("Pending Conflicts").text_color(colors.text))
+                    .child(
+                        Button::new("load-conflicts")
+                            .icon(IconName::RefreshCw)
+                            .label("Load")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_conflicts(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .mx_3()
+                    .mb_3()
+                    .overflow_y_scrollbar()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .children(self.conflicts.iter().map(|conflict| self.render_conflict_row(conflict))),
+            )
+    }
+
+    fn render_daemon(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        v_flex()
+            .size_full()
+            .gap_3()
+            .p_4()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("daemon-start")
+                            .icon(IconName::Play)
+                            .label("Start")
+                            .on_click(cx.listener(|this, _, _, cx| this.run_daemon_command("start", cx))),
+                    )
+                    .child(
+                        Button::new("daemon-status")
+                            .icon(IconName::Activity)
+                            .label("Status")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.run_daemon_command("status", cx))),
+                    )
+                    .child(
+                        Button::new("daemon-pause")
+                            .icon(IconName::Pause)
+                            .label("Pause")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.run_daemon_command("pause", cx))),
+                    )
+                    .child(
+                        Button::new("daemon-resume")
+                            .icon(IconName::RotateCcw)
+                            .label("Resume")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.run_daemon_command("resume", cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .child(Label::new("Daemon state").text_color(colors.text))
+                    .child(self.render_daemon_state()),
+            )
+            .when_some(self.command_result.as_ref(), |this, result| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .p_4()
+                        .bg(colors.panel)
+                        .border_1()
+                        .border_color(if result.ok { colors.success } else { colors.danger })
+                        .rounded_md()
+                        .child(Label::new(result.summary.as_str()).text_color(colors.text))
+                        .child(Label::new(result.output.as_str()).text_color(colors.muted).text_size(rems(0.78))),
+                )
+            })
+    }
+
+    fn render_workspace_detail(&self) -> impl IntoElement {
+        let colors = self.colors;
+        if let Some(workspace) = self.current_workspace() {
+            let device = workspace.device_id();
+            let manifest_time = workspace
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.generated_at.clone())
+                .unwrap_or_else(|| "-".to_string());
+            v_flex()
+                .gap_2()
+                .child(self.render_detail_row("Root", workspace.root_path().display().to_string()))
+                .child(self.render_detail_row("Remote", workspace.remote_path()))
+                .child(self.render_detail_row("Device", if device.is_empty() { "-".to_string() } else { device }))
+                .child(self.render_detail_row("Manifest", manifest_time))
+                .when_some(workspace.config_error.as_ref(), |this, error| {
+                    this.child(Label::new(error.as_str()).text_color(colors.danger))
+                })
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_2()
+                .child(Label::new("No initialized workspace found").text_color(colors.muted))
+                .into_any_element()
+        }
+    }
+
+    fn render_daemon_state(&self) -> impl IntoElement {
+        let colors = self.colors;
+        if let Some(workspace) = self.current_workspace() {
+            let state = workspace.daemon_state.as_ref();
+            let control = workspace.daemon_control.as_ref();
+            v_flex()
+                .gap_2()
+                .child(self.render_detail_row(
+                    "Status",
+                    state
+                        .map(|state| state.status.clone())
+                        .filter(|status| !status.is_empty())
+                        .unwrap_or_else(|| "not run".to_string()),
+                ))
+                .child(self.render_detail_row(
+                    "Cycles",
+                    state
+                        .map(|state| state.cycles_run.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                ))
+                .child(self.render_detail_row(
+                    "Failures",
+                    state
+                        .map(|state| state.consecutive_failures.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                ))
+                .child(self.render_detail_row(
+                    "Paused",
+                    control
+                        .map(|control| if control.paused { "yes" } else { "no" }.to_string())
+                        .unwrap_or_else(|| "no".to_string()),
+                ))
+                .when_some(state.and_then(|state| (!state.last_error.is_empty()).then_some(state.last_error.as_str())), |this, error| {
+                    this.child(Label::new(error).text_color(colors.danger))
+                })
+                .into_any_element()
+        } else {
+            Label::new("Select a workspace first").text_color(colors.muted).into_any_element()
+        }
+    }
+
+    fn render_detail_row(&self, key: &str, value: String) -> impl IntoElement {
+        let colors = self.colors;
+        h_flex()
+            .gap_3()
+            .items_start()
+            .child(div().w(px(88.)).child(Label::new(key).text_color(colors.muted)))
+            .child(Label::new(value).text_color(colors.text))
+    }
+
+    fn render_file_row(&self, file: &FileNode) -> impl IntoElement {
+        let colors = self.colors;
+        h_flex()
+            .gap_3()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(Icon::new(if file.node_type == "directory" { IconName::Folder } else { IconName::File }).small().text_color(colors.accent))
+            .child(v_flex().flex_1().child(Label::new(file.path.as_str()).text_color(colors.text)).child(Label::new(file.id.as_str()).text_color(colors.muted).text_size(rems(0.72))))
+            .child(Label::new(format_bytes(file.size)).text_color(colors.muted))
+            .child(self.render_status_badge(format!("v{}", file.version).as_str()))
+    }
+
+    fn render_conflict_row(&self, conflict: &SyncConflict) -> impl IntoElement {
+        let colors = self.colors;
+        h_flex()
+            .gap_3()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(Icon::new(IconName::GitPullRequest).small().text_color(colors.warning))
+            .child(v_flex().flex_1().child(Label::new(conflict.path.as_str()).text_color(colors.text)).child(Label::new(conflict.id.as_str()).text_color(colors.muted).text_size(rems(0.72))))
+            .child(Label::new(format!("local {}", optional_i64(conflict.local_version))).text_color(colors.muted))
+            .child(Label::new(format!("remote {}", optional_i64(conflict.remote_version))).text_color(colors.muted))
+            .child(self.render_status_badge(conflict.resolution.as_str()))
+    }
+
+    fn render_metric_tile(&self, title: &str, value: String, icon: IconName, color: Hsla) -> impl IntoElement {
+        let colors = self.colors;
+        v_flex()
+            .flex_1()
+            .gap_2()
+            .p_4()
+            .bg(colors.panel)
+            .border_1()
+            .border_color(colors.border)
+            .rounded_md()
+            .child(h_flex().justify_between().items_center().child(Label::new(title).text_color(colors.muted)).child(Icon::new(icon).text_color(color)))
+            .child(Label::new(value).text_color(colors.text).text_size(rems(1.5)))
+    }
+
+    fn render_tiny_metric(&self, name: &str, value: usize) -> impl IntoElement {
+        let colors = self.colors;
+        h_flex()
+            .gap_1()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(alpha(colors.muted, 0.08))
+            .child(Label::new(format!("{name} {value}")).text_color(colors.muted).text_size(rems(0.72)))
+    }
+
+    fn render_status_badge(&self, text: &str) -> impl IntoElement {
+        let colors = self.colors;
+        let lower = text.to_ascii_lowercase();
+        let color = if lower.contains("ready") || lower == "ok" || lower.starts_with('v') {
+            colors.success
+        } else if lower.contains("unchecked") || lower.contains("pending") || lower.contains("not") {
+            colors.warning
+        } else if lower.contains("unreachable") || lower.contains("error") || lower.contains("fail") {
+            colors.danger
+        } else {
+            colors.accent
+        };
+        h_flex()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(alpha(color, 0.12))
+            .child(Label::new(text).text_color(color).text_size(rems(0.75)))
+    }
+
+    fn render_nav_button(
+        &self,
+        id: &'static str,
+        view: MainView,
+        icon: IconName,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = self.colors;
+        Button::new(id)
+            .icon(icon)
+            .label(label)
+            .ghost()
+            .small()
+            .when(self.active_view == view, |button| {
+                button.bg(alpha(colors.accent, 0.10)).text_color(colors.accent)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.active_view = view;
+                cx.notify();
+            }))
+    }
+}
+
+impl Render for SyncHubDesktop {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        v_flex()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                TitleBar::new()
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new("title-refresh")
+                                    .icon(if self.loading { IconName::Loader } else { IconName::RefreshCw })
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| this.refresh_all(window, cx))),
+                            ),
+                    ),
+            )
+            .child(self.render_auth_panel(cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .size_full()
+                    .child(self.render_sidebar(cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .size_full()
+                            .child(self.render_tabs(cx))
+                            .child(self.render_content(cx)),
+                    ),
+            )
+    }
+}
+
+fn run_synchub_cli_daemon(action: &str, workspace_root: &PathBuf, config_path: &PathBuf) -> CommandResult {
+    let mut args = vec!["sync", "daemon"];
+    match action {
+        "status" => args.push("--status"),
+        "pause" => args.push("--pause"),
+        "resume" => args.push("--resume"),
+        "start" => {}
+        _ => {}
+    }
+    let root = workspace_root.display().to_string();
+    let config = config_path.display().to_string();
+    args.extend(["--path", &root, "--config", &config]);
+    run_command("synchub-cli", &args)
+}
+
+fn run_synchub_cli_workspace_init(root: &str, config_path: &PathBuf) -> CommandResult {
+    let config = config_path.display().to_string();
+    run_command("synchub-cli", &["workspace", "init", "--path", root, "--config", &config])
+}
+
+fn run_command(program: &str, args: &[&str]) -> CommandResult {
+    let output = Command::new(program).args(args).output();
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = if stderr.trim().is_empty() {
+                stdout.to_string()
+            } else {
+                format!("{stdout}{stderr}")
+            };
+            CommandResult {
+                ok: output.status.success(),
+                summary: if output.status.success() {
+                    "command completed".to_string()
+                } else {
+                    format!("command exited with {}", output.status)
+                },
+                output: combined,
+            }
+        }
+        Err(error) => CommandResult {
+            ok: false,
+            summary: format!("failed to start {program}: {error}"),
+            output: String::new(),
+        },
+    }
+}
+
+fn optional_i64(value: Option<i64>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
+fn rfc3339_from_system_time(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let (year, month, day, hour, minute, second) = civil_from_unix(seconds);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_unix(seconds: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let days = seconds.div_euclid(86_400);
+    let secs_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    (
+        year,
+        month,
+        day,
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + (month <= 2) as i64;
+    (year, month, day)
+}

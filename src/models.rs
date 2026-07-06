@@ -1,0 +1,274 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ApiStatus {
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct User {
+    pub id: String,
+    pub email: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TokenPair {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+}
+
+impl TokenPair {
+    pub fn access_token_expires_at(&self, now: SystemTime) -> SystemTime {
+        now + Duration::from_secs(self.expires_in.max(0) as u64)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct LoginData {
+    pub user: User,
+    pub tokens: TokenPair,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ApiEnvelope<T> {
+    pub code: serde_json::Value,
+    pub message: String,
+    pub data: Option<T>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CliConfig {
+    pub server_url: String,
+    pub user: User,
+    pub tokens: TokenPair,
+    pub access_token_expires_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct WorkspaceRegistry {
+    pub version: i32,
+    pub updated_at: Option<String>,
+    pub workspaces: Vec<WorkspaceRegistryEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct WorkspaceRegistryEntry {
+    pub root: String,
+    pub workspace_config_path: String,
+    pub config_path: String,
+    pub remote_path: String,
+    pub server_url: String,
+    pub user_id: String,
+    pub user_email: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct WorkspaceConfig {
+    pub version: i32,
+    pub root: String,
+    pub remote_path: String,
+    pub server_url: String,
+    pub user_id: String,
+    pub user_email: String,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub device_platform: Option<String>,
+    pub last_applied_change_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct Manifest {
+    pub version: i32,
+    pub root: String,
+    pub remote_path: String,
+    pub generated_at: Option<String>,
+    pub items: Vec<ManifestEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub relative_path: String,
+    pub size: i64,
+    pub sha256: String,
+    pub remote_version: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SyncAgentState {
+    pub version: i32,
+    pub root: String,
+    pub status: String,
+    pub cycles_run: i32,
+    pub consecutive_failures: i32,
+    pub last_success_at: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub last_error: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SyncAgentControl {
+    pub version: i32,
+    pub paused: bool,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct FileListData {
+    pub items: Vec<FileNode>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct FileNode {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub path: String,
+    pub node_type: String,
+    pub size: i64,
+    pub sha256: Option<String>,
+    pub version: i64,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SyncConflictListData {
+    pub items: Vec<SyncConflict>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SyncConflict {
+    pub id: String,
+    pub file_id: Option<String>,
+    pub path: String,
+    pub local_version: Option<i64>,
+    pub remote_version: Option<i64>,
+    pub resolution: String,
+    pub created_at: Option<String>,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceSnapshot {
+    pub entry: WorkspaceRegistryEntry,
+    pub config: Option<WorkspaceConfig>,
+    pub manifest: Option<Manifest>,
+    pub daemon_state: Option<SyncAgentState>,
+    pub daemon_control: Option<SyncAgentControl>,
+    pub trash_entries: usize,
+    pub config_error: Option<String>,
+}
+
+impl WorkspaceSnapshot {
+    pub fn root_path(&self) -> PathBuf {
+        PathBuf::from(if self.entry.root.is_empty() {
+            self.config
+                .as_ref()
+                .map(|config| config.root.as_str())
+                .unwrap_or("")
+        } else {
+            self.entry.root.as_str()
+        })
+    }
+
+    pub fn display_name(&self) -> String {
+        let root = self.root_path();
+        root.file_name()
+            .and_then(|value| value.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.entry.remote_path.clone())
+    }
+
+    pub fn remote_path(&self) -> String {
+        self.config
+            .as_ref()
+            .map(|config| config.remote_path.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| self.entry.remote_path.clone())
+    }
+
+    pub fn device_id(&self) -> String {
+        self.config
+            .as_ref()
+            .and_then(|config| config.device_id.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn server_url(&self, fallback: &str) -> String {
+        self.config
+            .as_ref()
+            .map(|config| config.server_url.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!self.entry.server_url.is_empty()).then(|| self.entry.server_url.clone()))
+            .unwrap_or_else(|| fallback.to_string())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceMetrics {
+    pub manifest_files: usize,
+    pub remote_tracked: usize,
+    pub local_only: usize,
+    pub pending_local_changes: usize,
+    pub trash_entries: usize,
+    pub daemon_status: String,
+}
+
+pub fn workspace_metrics(snapshot: &WorkspaceSnapshot) -> WorkspaceMetrics {
+    let mut metrics = WorkspaceMetrics {
+        trash_entries: snapshot.trash_entries,
+        daemon_status: snapshot
+            .daemon_state
+            .as_ref()
+            .map(|state| state.status.clone())
+            .filter(|status| !status.is_empty())
+            .unwrap_or_else(|| "not run".to_string()),
+        ..WorkspaceMetrics::default()
+    };
+
+    if let Some(manifest) = &snapshot.manifest {
+        metrics.manifest_files = manifest.items.len();
+        for item in &manifest.items {
+            if item.remote_version.is_some() {
+                metrics.remote_tracked += 1;
+            } else {
+                metrics.local_only += 1;
+            }
+        }
+    }
+
+    metrics
+}
+
+pub fn format_bytes(size: i64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = size.max(0) as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < units.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", size.max(0), units[unit])
+    } else {
+        format!("{:.1} {}", value, units[unit])
+    }
+}
+
+pub fn is_success_code(code: &serde_json::Value) -> bool {
+    match code {
+        serde_json::Value::Null => true,
+        serde_json::Value::Number(value) => value.as_i64() == Some(0),
+        serde_json::Value::String(value) => value.is_empty() || value == "0",
+        _ => false,
+    }
+}
