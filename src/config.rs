@@ -4,7 +4,7 @@ use crate::models::{
 };
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,10 +52,7 @@ pub fn default_cli_config_path() -> PathBuf {
     }
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .or_else(|| {
-            directories::BaseDirs::new()
-                .map(|dirs| dirs.config_dir().to_path_buf())
-        })
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.config_dir().to_path_buf()))
         .unwrap_or_else(|| PathBuf::from(".synchub"))
         .join("SyncHub")
         .join("config.json")
@@ -90,8 +87,12 @@ pub fn remove_cli_config(config_path: &Path) -> Result<()> {
 }
 
 pub fn load_workspace_registry(path: &Path) -> Result<WorkspaceRegistry> {
-    Ok(read_optional_json::<WorkspaceRegistry>(path)?
-        .unwrap_or_else(|| WorkspaceRegistry { version: 1, ..WorkspaceRegistry::default() }))
+    Ok(
+        read_optional_json::<WorkspaceRegistry>(path)?.unwrap_or_else(|| WorkspaceRegistry {
+            version: 1,
+            ..WorkspaceRegistry::default()
+        }),
+    )
 }
 
 pub fn load_workspace_snapshots(registry_path: &Path) -> Result<Vec<WorkspaceSnapshot>> {
@@ -110,10 +111,7 @@ pub fn load_workspace_snapshot(entry: WorkspaceRegistryEntry) -> WorkspaceSnapsh
     };
 
     let config_path = if snapshot.entry.workspace_config_path.is_empty() {
-        snapshot
-            .root_path()
-            .join(".synchub")
-            .join("workspace.json")
+        snapshot.root_path().join(".synchub").join("workspace.json")
     } else {
         PathBuf::from(&snapshot.entry.workspace_config_path)
     };
@@ -128,10 +126,14 @@ pub fn load_workspace_snapshot(entry: WorkspaceRegistryEntry) -> WorkspaceSnapsh
     if let Ok(manifest) = read_optional_json::<Manifest>(&manifest_path) {
         snapshot.manifest = manifest;
     }
-    if let Ok(state) = read_optional_json::<SyncAgentState>(&root.join(".synchub").join("daemon-state.json")) {
+    if let Ok(state) =
+        read_optional_json::<SyncAgentState>(&root.join(".synchub").join("daemon-state.json"))
+    {
         snapshot.daemon_state = state;
     }
-    if let Ok(control) = read_optional_json::<SyncAgentControl>(&root.join(".synchub").join("daemon-control.json")) {
+    if let Ok(control) =
+        read_optional_json::<SyncAgentControl>(&root.join(".synchub").join("daemon-control.json"))
+    {
         snapshot.daemon_control = control;
     }
     snapshot.trash_entries = count_trash_entries(&root.join(".synchub").join("trash"));

@@ -77,7 +77,11 @@ impl SyncHubClient {
             .await
     }
 
-    pub async fn list_conflicts(&self, access_token: &str, limit: u32) -> Result<SyncConflictListData> {
+    pub async fn list_conflicts(
+        &self,
+        access_token: &str,
+        limit: u32,
+    ) -> Result<SyncConflictListData> {
         let path = format!("/api/v1/sync/conflicts?resolution=pending&limit={}", limit);
         self.request_json(Method::GET, &path, Some(access_token), None)
             .await
@@ -219,7 +223,13 @@ mod tests {
 
     #[test]
     fn normalizes_base_url() {
-        assert_eq!(normalize_base_url("localhost:8765/"), "http://localhost:8765");
-        assert_eq!(normalize_base_url("https://sync.example/"), "https://sync.example");
+        assert_eq!(
+            normalize_base_url("localhost:8765/"),
+            "http://localhost:8765"
+        );
+        assert_eq!(
+            normalize_base_url("https://sync.example/"),
+            "https://sync.example"
+        );
     }
 }

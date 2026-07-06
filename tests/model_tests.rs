@@ -6,8 +6,14 @@ use synchub_desktop::models::{
 
 #[test]
 fn base_url_is_normalized() {
-    assert_eq!(normalize_base_url("localhost:8765/"), "http://localhost:8765");
-    assert_eq!(normalize_base_url("https://sync.likanug.app/"), "https://sync.likanug.app");
+    assert_eq!(
+        normalize_base_url("localhost:8765/"),
+        "http://localhost:8765"
+    );
+    assert_eq!(
+        normalize_base_url("https://sync.likanug.app/"),
+        "https://sync.likanug.app"
+    );
 }
 
 #[test]
@@ -20,8 +26,14 @@ fn workspace_metrics_count_manifest_versions() {
         },
         manifest: Some(Manifest {
             items: vec![
-                ManifestEntry { remote_version: Some(1), ..ManifestEntry::default() },
-                ManifestEntry { remote_version: None, ..ManifestEntry::default() },
+                ManifestEntry {
+                    remote_version: Some(1),
+                    ..ManifestEntry::default()
+                },
+                ManifestEntry {
+                    remote_version: None,
+                    ..ManifestEntry::default()
+                },
             ],
             ..Manifest::default()
         }),

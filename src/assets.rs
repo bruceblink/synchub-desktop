@@ -1,5 +1,4 @@
 use gpui::*;
-use gpui_component::*;
 use gpui_component_assets::Assets as ComponentAssets;
 
 pub struct AppAssets;
