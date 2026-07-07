@@ -87,7 +87,24 @@ impl SyncHubClient {
             Method::POST,
             "/api/v1/files/directories",
             Some(access_token),
-            Some(create_directory_body(path, device_id)),
+            Some(path_device_body(path, device_id)),
+        )
+        .await
+    }
+
+    pub async fn move_file(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        path: &str,
+        device_id: Option<&str>,
+    ) -> Result<FileNode> {
+        let endpoint = format!("/api/v1/files/{}", file_id);
+        self.request_json(
+            Method::PATCH,
+            &endpoint,
+            Some(access_token),
+            Some(path_device_body(path, device_id)),
         )
         .await
     }
@@ -183,7 +200,7 @@ impl SyncHubClient {
     }
 }
 
-fn create_directory_body(path: &str, device_id: Option<&str>) -> serde_json::Value {
+fn path_device_body(path: &str, device_id: Option<&str>) -> serde_json::Value {
     let mut body = json!({ "path": path });
     if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
         body["device_id"] = json!(device_id);
@@ -300,13 +317,13 @@ mod tests {
     }
 
     #[test]
-    fn create_directory_body_omits_empty_device_id() {
+    fn path_device_body_omits_empty_device_id() {
         assert_eq!(
-            create_directory_body("/workspace/docs", Some("dev_1")),
+            path_device_body("/workspace/docs", Some("dev_1")),
             json!({ "path": "/workspace/docs", "device_id": "dev_1" })
         );
         assert_eq!(
-            create_directory_body("/workspace/docs", Some("")),
+            path_device_body("/workspace/docs", Some("")),
             json!({ "path": "/workspace/docs" })
         );
     }

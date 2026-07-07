@@ -55,6 +55,7 @@ pub struct SyncHubDesktop {
     workspace_input: Entity<InputState>,
     remote_root_input: Entity<InputState>,
     remote_directory_input: Entity<InputState>,
+    remote_target_input: Entity<InputState>,
     settings: DesktopSettings,
     cli_config_path: PathBuf,
     registry_path: PathBuf,
@@ -92,6 +93,8 @@ impl SyncHubDesktop {
         let remote_root_input = cx.new(|cx| InputState::new(window, cx).placeholder("Remote root"));
         let remote_directory_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("New remote folder"));
+        let remote_target_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Move target path"));
 
         let cli_config_path = default_cli_config_path();
         let registry_path = default_workspace_registry_path(&cli_config_path);
@@ -102,6 +105,7 @@ impl SyncHubDesktop {
             workspace_input,
             remote_root_input,
             remote_directory_input,
+            remote_target_input,
             settings,
             cli_config_path,
             registry_path,
@@ -455,6 +459,73 @@ impl SyncHubDesktop {
                             }
                             Err(error) => {
                                 this.message = format!("delete remote item failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn move_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before moving a remote item", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before moving a remote item", cx);
+            return;
+        };
+        let input = self.remote_target_input.read(cx).value().to_string();
+        let Some(target_path) = compose_remote_directory_path(&input, &workspace.remote_path())
+        else {
+            self.set_message("move target path is invalid", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    let moved = client
+                        .move_file(
+                            &config.tokens.access_token,
+                            &file.id,
+                            &target_path,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, FileNode, FileNode, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        file,
+                        moved,
+                        files.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, old, moved, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message =
+                                    format!("moved remote item {} -> {}", old.path, moved.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("move remote item failed: {error}")
                             }
                         }
                         cx.notify();
@@ -1171,6 +1242,11 @@ impl SyncHubDesktop {
                             .child(Input::new(&self.remote_directory_input)),
                     )
                     .child(
+                        div()
+                            .w(px(220.))
+                            .child(Input::new(&self.remote_target_input)),
+                    )
+                    .child(
                         Button::new("create-remote-directory")
                             .icon(IconName::Plus)
                             .label("New Folder")
@@ -1463,6 +1539,7 @@ impl SyncHubDesktop {
 
     fn render_file_row(&self, file: &FileNode, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let file_for_move = file.clone();
         let file_for_delete = file.clone();
         h_flex()
             .gap_3()
@@ -1492,6 +1569,16 @@ impl SyncHubDesktop {
             )
             .child(Label::new(format_bytes(file.size)).text_color(colors.muted))
             .child(self.render_status_badge(format!("v{}", file.version).as_str()))
+            .child(
+                Button::new(format!("move-file-{}", file.id))
+                    .icon(IconName::ArrowRight)
+                    .ghost()
+                    .small()
+                    .disabled(self.loading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.move_remote_file(file_for_move.clone(), cx)
+                    })),
+            )
             .child(
                 Button::new(format!("delete-file-{}", file.id))
                     .icon(IconName::Close)
