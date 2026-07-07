@@ -92,6 +92,22 @@ impl SyncHubClient {
         .await
     }
 
+    pub async fn delete_file(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<()> {
+        let path = format!("/api/v1/files/{}", file_id);
+        self.request_empty(
+            Method::DELETE,
+            &path,
+            Some(access_token),
+            Some(device_body(device_id)),
+        )
+        .await
+    }
+
     pub async fn list_conflicts(
         &self,
         access_token: &str,
@@ -131,10 +147,7 @@ impl SyncHubClient {
         access_token: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> Result<()> {
-        let _: serde_json::Value = self
-            .request_json(method, path, access_token, body)
-            .await
-            .unwrap_or(serde_json::Value::Null);
+        let _: serde_json::Value = self.request_json(method, path, access_token, body).await?;
         Ok(())
     }
 
@@ -172,6 +185,14 @@ impl SyncHubClient {
 
 fn create_directory_body(path: &str, device_id: Option<&str>) -> serde_json::Value {
     let mut body = json!({ "path": path });
+    if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+        body["device_id"] = json!(device_id);
+    }
+    body
+}
+
+fn device_body(device_id: Option<&str>) -> serde_json::Value {
+    let mut body = json!({});
     if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
         body["device_id"] = json!(device_id);
     }
@@ -288,5 +309,11 @@ mod tests {
             create_directory_body("/workspace/docs", Some("")),
             json!({ "path": "/workspace/docs" })
         );
+    }
+
+    #[test]
+    fn device_body_omits_empty_device_id() {
+        assert_eq!(device_body(Some("dev_1")), json!({ "device_id": "dev_1" }));
+        assert_eq!(device_body(Some("")), json!({}));
     }
 }

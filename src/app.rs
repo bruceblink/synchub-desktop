@@ -407,6 +407,64 @@ impl SyncHubDesktop {
         .detach();
     }
 
+    fn delete_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before deleting a remote item", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before deleting a remote item", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    client
+                        .delete_file(
+                            &config.tokens.access_token,
+                            &file.id,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        file,
+                        files.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, file, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message = format!("deleted remote item {}", file.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("delete remote item failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn refresh_conflicts(&mut self, cx: &mut Context<Self>) {
         let Some(mut config) = self.cli_config.clone() else {
             return;
@@ -1090,6 +1148,12 @@ impl SyncHubDesktop {
 
     fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let file_rows = self
+            .files
+            .iter()
+            .map(|file| self.render_file_row(file, cx).into_any_element())
+            .collect::<Vec<_>>();
+
         v_flex()
             .size_full()
             .bg(colors.bg)
@@ -1134,7 +1198,7 @@ impl SyncHubDesktop {
                     .border_1()
                     .border_color(colors.border)
                     .rounded_md()
-                    .children(self.files.iter().map(|file| self.render_file_row(file))),
+                    .children(file_rows),
             )
     }
 
@@ -1397,8 +1461,9 @@ impl SyncHubDesktop {
             .child(Label::new(value).text_color(colors.text))
     }
 
-    fn render_file_row(&self, file: &FileNode) -> impl IntoElement {
+    fn render_file_row(&self, file: &FileNode, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let file_for_delete = file.clone();
         h_flex()
             .gap_3()
             .items_center()
@@ -1427,6 +1492,16 @@ impl SyncHubDesktop {
             )
             .child(Label::new(format_bytes(file.size)).text_color(colors.muted))
             .child(self.render_status_badge(format!("v{}", file.version).as_str()))
+            .child(
+                Button::new(format!("delete-file-{}", file.id))
+                    .icon(IconName::Close)
+                    .ghost()
+                    .small()
+                    .disabled(self.loading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.delete_remote_file(file_for_delete.clone(), cx)
+                    })),
+            )
     }
 
     fn render_device_row(&self, device: &Device) -> impl IntoElement {
