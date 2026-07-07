@@ -5,7 +5,8 @@ use synchub_desktop::models::{
     is_success_code, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
-    parse_workspace_paths, sync_command_args, workspace_init_command_args,
+    parse_workspace_paths, sync_command_args, trash_list_command_args, trash_restore_command_args,
+    workspace_init_command_args,
 };
 
 #[test]
@@ -163,6 +164,51 @@ fn workspace_init_args_support_multiple_paths() {
 #[test]
 fn workspace_init_args_reject_empty_paths() {
     assert!(workspace_init_command_args(&[], "", "C:/cfg/config.json").is_none());
+}
+
+#[test]
+fn trash_list_args_use_json_output() {
+    assert_eq!(
+        trash_list_command_args("C:/work", "C:/work/.synchub/workspace.json", 25)
+            .expect("trash list args"),
+        vec![
+            "sync",
+            "trash",
+            "--path",
+            "C:/work",
+            "--workspace-config",
+            "C:/work/.synchub/workspace.json",
+            "--limit",
+            "25",
+            "--json",
+        ]
+    );
+}
+
+#[test]
+fn trash_restore_args_include_batch_and_entry() {
+    assert_eq!(
+        trash_restore_command_args(
+            "C:/work",
+            "C:/work/.synchub/workspace.json",
+            "20260702T010000.000000000Z",
+            "/docs/readme.md/",
+        )
+        .expect("trash restore args"),
+        vec![
+            "sync",
+            "trash",
+            "restore",
+            "--path",
+            "C:/work",
+            "--workspace-config",
+            "C:/work/.synchub/workspace.json",
+            "--batch",
+            "20260702T010000.000000000Z",
+            "--entry",
+            "docs/readme.md",
+        ]
+    );
 }
 
 #[test]

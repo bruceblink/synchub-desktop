@@ -4,11 +4,13 @@ use crate::config::{
     load_settings, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
 };
 use crate::models::{
-    CliConfig, Device, FileNode, SyncConflict, WorkspaceSnapshot, compose_remote_directory_path,
-    conflict_resolution_label, format_bytes, is_current_device, workspace_metrics,
+    CliConfig, Device, FileNode, SyncConflict, SyncTrashSnapshot, TrashEntry, WorkspaceSnapshot,
+    compose_remote_directory_path, conflict_resolution_label, format_bytes, is_current_device,
+    workspace_metrics,
 };
 use crate::sync_commands::{
-    parse_workspace_paths, sync_action_label, sync_command_args, workspace_init_command_args,
+    parse_workspace_paths, sync_action_label, sync_command_args, trash_list_command_args,
+    trash_restore_command_args, workspace_init_command_args,
 };
 use crate::theme::{ThemeColors, alpha};
 use gpui::prelude::*;
@@ -30,6 +32,7 @@ enum MainView {
     Overview,
     Sync,
     Files,
+    Trash,
     Devices,
     Conflicts,
     Daemon,
@@ -64,6 +67,7 @@ pub struct SyncHubDesktop {
     selected_workspace: usize,
     api_status: Option<String>,
     files: Vec<FileNode>,
+    trash_entries: Vec<TrashEntry>,
     devices: Vec<Device>,
     conflicts: Vec<SyncConflict>,
     active_view: MainView,
@@ -114,6 +118,7 @@ impl SyncHubDesktop {
             selected_workspace: 0,
             api_status: None,
             files: Vec::new(),
+            trash_entries: Vec::new(),
             devices: Vec::new(),
             conflicts: Vec::new(),
             active_view: MainView::Overview,
@@ -182,6 +187,7 @@ impl SyncHubDesktop {
         self.reload_local_state(window, cx);
         self.refresh_api(cx);
         self.refresh_files(cx);
+        self.refresh_trash(cx);
         self.refresh_devices(cx);
         self.refresh_conflicts(cx);
     }
@@ -295,6 +301,7 @@ impl SyncHubDesktop {
                             Ok(()) => {
                                 this.cli_config = None;
                                 this.files.clear();
+                                this.trash_entries.clear();
                                 this.devices.clear();
                                 this.conflicts.clear();
                                 this.message = "signed out".to_string();
@@ -527,6 +534,94 @@ impl SyncHubDesktop {
                             Err(error) => {
                                 this.message = format!("move remote item failed: {error}")
                             }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_trash(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before loading local trash", cx);
+            return;
+        };
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let (result, entries) = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_trash_list(&workspace_root, &workspace_config)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    (
+                        CommandResult {
+                            ok: false,
+                            summary: format!("load trash failed: {error}"),
+                            output: String::new(),
+                        },
+                        Vec::new(),
+                    )
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if result.ok {
+                            this.trash_entries = entries;
+                        }
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn restore_trash_entry(&mut self, entry: TrashEntry, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before restoring trash", cx);
+            return;
+        };
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let (result, entries) = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_trash_restore(&workspace_root, &workspace_config, &entry)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    (
+                        CommandResult {
+                            ok: false,
+                            summary: format!("restore trash failed: {error}"),
+                            output: String::new(),
+                        },
+                        None,
+                    )
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Some(entries) = entries {
+                            this.trash_entries = entries;
+                        }
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
                         }
                         cx.notify();
                     });
@@ -1038,6 +1133,7 @@ impl SyncHubDesktop {
                 cx,
             ))
             .child(self.render_nav_button("files", MainView::Files, IconName::File, "Files", cx))
+            .child(self.render_nav_button("trash", MainView::Trash, IconName::Inbox, "Trash", cx))
             .child(self.render_nav_button("sync", MainView::Sync, IconName::Redo2, "Sync", cx))
             .child(self.render_nav_button(
                 "devices",
@@ -1067,6 +1163,7 @@ impl SyncHubDesktop {
             MainView::Overview => self.render_overview(cx).into_any_element(),
             MainView::Sync => self.render_sync(cx).into_any_element(),
             MainView::Files => self.render_files(cx).into_any_element(),
+            MainView::Trash => self.render_trash(cx).into_any_element(),
             MainView::Devices => self.render_devices(cx).into_any_element(),
             MainView::Conflicts => self.render_conflicts(cx).into_any_element(),
             MainView::Daemon => self.render_daemon(cx).into_any_element(),
@@ -1275,6 +1372,46 @@ impl SyncHubDesktop {
                     .border_color(colors.border)
                     .rounded_md()
                     .children(file_rows),
+            )
+    }
+
+    fn render_trash(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let trash_rows = self
+            .trash_entries
+            .iter()
+            .map(|entry| self.render_trash_row(entry, cx).into_any_element())
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .p_3()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("Local Trash").text_color(colors.text))
+                    .child(
+                        Button::new("load-trash")
+                            .icon(IconName::Redo2)
+                            .label("Load")
+                            .small()
+                            .disabled(self.loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_trash(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .mx_3()
+                    .mb_3()
+                    .overflow_y_scrollbar()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .children(trash_rows),
             )
     }
 
@@ -1535,6 +1672,57 @@ impl SyncHubDesktop {
                     .child(Label::new(key).text_color(colors.muted)),
             )
             .child(Label::new(value).text_color(colors.text))
+    }
+
+    fn render_trash_row(&self, entry: &TrashEntry, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let entry_for_restore = entry.clone();
+        h_flex()
+            .gap_3()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                Icon::new(if entry.is_dir {
+                    IconName::FolderOpen
+                } else {
+                    IconName::File
+                })
+                .small()
+                .text_color(colors.warning),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .child(Label::new(entry.path.as_str()).text_color(colors.text))
+                    .child(
+                        Label::new(entry.batch.as_str())
+                            .text_color(colors.muted)
+                            .text_size(rems(0.72)),
+                    ),
+            )
+            .child(
+                Label::new(if entry.is_dir {
+                    "-".to_string()
+                } else {
+                    format_bytes(entry.size)
+                })
+                .text_color(colors.muted),
+            )
+            .child(self.render_status_badge(if entry.is_dir { "directory" } else { "file" }))
+            .child(
+                Button::new(format!("restore-trash-{}-{}", entry.batch, entry.path))
+                    .icon(IconName::Undo2)
+                    .label("Restore")
+                    .ghost()
+                    .small()
+                    .disabled(self.loading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.restore_trash_entry(entry_for_restore.clone(), cx)
+                    })),
+            )
     }
 
     fn render_file_row(&self, file: &FileNode, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1866,6 +2054,87 @@ impl Render for SyncHubDesktop {
                     ),
             )
     }
+}
+
+fn run_synchub_cli_trash_list(
+    workspace_root: &PathBuf,
+    workspace_config: &PathBuf,
+) -> (CommandResult, Vec<TrashEntry>) {
+    let root = workspace_root.display().to_string();
+    let config = workspace_config.display().to_string();
+    let Some(args) = trash_list_command_args(&root, &config, 200) else {
+        return (
+            CommandResult {
+                ok: false,
+                summary: "workspace path is required".to_string(),
+                output: String::new(),
+            },
+            Vec::new(),
+        );
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    let entries = if result.ok {
+        match serde_json::from_str::<SyncTrashSnapshot>(&result.output) {
+            Ok(snapshot) => snapshot.items,
+            Err(error) => {
+                result.ok = false;
+                result.summary = format!("decode trash failed: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if result.ok {
+        result.summary = format!("loaded {} trash item(s)", entries.len());
+    } else {
+        result.summary = format!("load trash failed: {}", result.summary);
+    }
+    (result, entries)
+}
+
+fn run_synchub_cli_trash_restore(
+    workspace_root: &PathBuf,
+    workspace_config: &PathBuf,
+    entry: &TrashEntry,
+) -> (CommandResult, Option<Vec<TrashEntry>>) {
+    let root = workspace_root.display().to_string();
+    let config = workspace_config.display().to_string();
+    let Some(args) = trash_restore_command_args(&root, &config, &entry.batch, &entry.path) else {
+        return (
+            CommandResult {
+                ok: false,
+                summary: "trash batch and entry are required".to_string(),
+                output: String::new(),
+            },
+            None,
+        );
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    if !result.ok {
+        result.summary = format!("restore trash failed: {}", result.summary);
+        return (result, None);
+    }
+
+    let restore_output = result.output.clone();
+    let (list_result, entries) = run_synchub_cli_trash_list(workspace_root, workspace_config);
+    result.output = if list_result.output.trim().is_empty() {
+        restore_output
+    } else {
+        format!("{restore_output}\n{}", list_result.output)
+    };
+    result.ok = list_result.ok;
+    result.summary = if list_result.ok {
+        format!("restored trash item {}", entry.path)
+    } else {
+        format!(
+            "restored {}, but refresh failed: {}",
+            entry.path, list_result.summary
+        )
+    };
+    (result, Some(entries))
 }
 
 fn run_synchub_cli_daemon(

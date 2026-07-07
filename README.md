@@ -13,6 +13,7 @@ SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust proje
 - Create remote folders in the selected workspace.
 - Move or rename remote files and folders from the selected workspace.
 - Delete remote files or folders from the selected workspace.
+- List local trash entries for the selected workspace and restore them.
 - List registered sync devices and highlight the current workspace device.
 - Run common sync commands for the selected workspace: status, doctor, dry run, sync once, push, and pull.
 - Start, pause, resume, and inspect the SyncHub CLI daemon by shelling out to `synchub-cli`.

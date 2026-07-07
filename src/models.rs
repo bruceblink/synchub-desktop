@@ -173,6 +173,19 @@ pub struct SyncConflict {
     pub resolved_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct TrashEntry {
+    pub batch: String,
+    pub path: String,
+    pub size: i64,
+    pub is_dir: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct SyncTrashSnapshot {
+    pub items: Vec<TrashEntry>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkspaceSnapshot {
     pub entry: WorkspaceRegistryEntry,
@@ -226,6 +239,14 @@ impl WorkspaceSnapshot {
             .filter(|value| !value.is_empty())
             .or_else(|| (!self.entry.server_url.is_empty()).then(|| self.entry.server_url.clone()))
             .unwrap_or_else(|| fallback.to_string())
+    }
+
+    pub fn workspace_config_path(&self) -> PathBuf {
+        if self.entry.workspace_config_path.trim().is_empty() {
+            self.root_path().join(".synchub").join("workspace.json")
+        } else {
+            PathBuf::from(&self.entry.workspace_config_path)
+        }
     }
 }
 
