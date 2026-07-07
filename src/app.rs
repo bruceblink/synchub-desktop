@@ -7,7 +7,9 @@ use crate::models::{
     CliConfig, FileNode, SyncConflict, WorkspaceSnapshot, conflict_resolution_label, format_bytes,
     workspace_metrics,
 };
-use crate::sync_commands::{sync_action_label, sync_command_args};
+use crate::sync_commands::{
+    parse_workspace_paths, sync_action_label, sync_command_args, workspace_init_command_args,
+};
 use crate::theme::{ThemeColors, alpha};
 use gpui::prelude::*;
 use gpui::*;
@@ -50,6 +52,7 @@ pub struct SyncHubDesktop {
     email_input: Entity<InputState>,
     password_input: Entity<InputState>,
     workspace_input: Entity<InputState>,
+    remote_root_input: Entity<InputState>,
     settings: DesktopSettings,
     cli_config_path: PathBuf,
     registry_path: PathBuf,
@@ -82,7 +85,8 @@ impl SyncHubDesktop {
                 .masked(true)
         });
         let workspace_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace path"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace paths"));
+        let remote_root_input = cx.new(|cx| InputState::new(window, cx).placeholder("Remote root"));
 
         let cli_config_path = default_cli_config_path();
         let registry_path = default_workspace_registry_path(&cli_config_path);
@@ -91,6 +95,7 @@ impl SyncHubDesktop {
             email_input,
             password_input,
             workspace_input,
+            remote_root_input,
             settings,
             cli_config_path,
             registry_path,
@@ -501,14 +506,19 @@ impl SyncHubDesktop {
     }
 
     fn init_workspace(&mut self, cx: &mut Context<Self>) {
-        let root = self.workspace_input.read(cx).value().to_string();
+        let roots = parse_workspace_paths(self.workspace_input.read(cx).value().as_ref());
+        if roots.is_empty() {
+            self.set_message("workspace path is required", cx);
+            return;
+        }
+        let remote_root = self.remote_root_input.read(cx).value().to_string();
         let config_path = self.cli_config_path.clone();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let result = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_workspace_init(&root, &config_path)
+                    run_synchub_cli_workspace_init(&roots, &remote_root, &config_path)
                 })
                 .await
                 .unwrap_or_else(|error| CommandResult {
@@ -678,10 +688,11 @@ impl SyncHubDesktop {
                     .pb_3()
                     .gap_2()
                     .child(Input::new(&self.workspace_input))
+                    .child(Input::new(&self.remote_root_input))
                     .child(
                         Button::new("init-workspace")
                             .icon(IconName::Plus)
-                            .label("Init")
+                            .label("Init Selected")
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| this.init_workspace(cx))),
@@ -1487,12 +1498,27 @@ fn run_synchub_cli_daemon(
     run_command("synchub-cli", &args)
 }
 
-fn run_synchub_cli_workspace_init(root: &str, config_path: &PathBuf) -> CommandResult {
+fn run_synchub_cli_workspace_init(
+    roots: &[String],
+    remote_root: &str,
+    config_path: &PathBuf,
+) -> CommandResult {
     let config = config_path.display().to_string();
-    run_command(
-        "synchub-cli",
-        &["workspace", "init", "--path", root, "--config", &config],
-    )
+    let Some(args) = workspace_init_command_args(roots, remote_root, &config) else {
+        return CommandResult {
+            ok: false,
+            summary: "workspace path is required".to_string(),
+            output: String::new(),
+        };
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    result.summary = if result.ok {
+        format!("initialized {} workspace(s)", roots.len())
+    } else {
+        format!("workspace init failed: {}", result.summary)
+    };
+    result
 }
 
 fn run_synchub_cli_sync(

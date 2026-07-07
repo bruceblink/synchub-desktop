@@ -3,7 +3,9 @@ use synchub_desktop::models::{
     Manifest, ManifestEntry, WorkspaceRegistryEntry, WorkspaceSnapshot, conflict_resolution_label,
     format_bytes, is_success_code, workspace_metrics,
 };
-use synchub_desktop::sync_commands::sync_command_args;
+use synchub_desktop::sync_commands::{
+    parse_workspace_paths, sync_command_args, workspace_init_command_args,
+};
 
 #[test]
 fn base_url_is_normalized() {
@@ -108,4 +110,39 @@ fn status_sync_command_includes_remote_context() {
 #[test]
 fn unknown_sync_command_is_rejected() {
     assert!(sync_command_args("bogus", "C:/work", "C:/cfg/config.json").is_none());
+}
+
+#[test]
+fn workspace_paths_are_split_for_batch_init() {
+    assert_eq!(
+        parse_workspace_paths("C:/work/notes\n\"D:/work/code\"; E:/work/docs "),
+        vec!["C:/work/notes", "D:/work/code", "E:/work/docs"]
+    );
+}
+
+#[test]
+fn workspace_init_args_support_multiple_paths() {
+    let roots = vec!["C:/work/notes".to_string(), "D:/work/code".to_string()];
+
+    assert_eq!(
+        workspace_init_command_args(&roots, "/workspace", "C:/cfg/config.json")
+            .expect("workspace init args"),
+        vec![
+            "workspace",
+            "init",
+            "--path",
+            "C:/work/notes",
+            "--path",
+            "D:/work/code",
+            "--remote-root",
+            "/workspace",
+            "--config",
+            "C:/cfg/config.json",
+        ]
+    );
+}
+
+#[test]
+fn workspace_init_args_reject_empty_paths() {
+    assert!(workspace_init_command_args(&[], "", "C:/cfg/config.json").is_none());
 }
