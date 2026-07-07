@@ -1,7 +1,8 @@
-use super::formatting::{device_name, format_optional, optional_i64};
+use super::formatting::{device_name, format_optional, optional_i64, short_hash};
 use super::{AuthMode, MainView, SyncHubDesktop};
 use crate::models::{
-    Device, FileNode, SyncConflict, TrashEntry, format_bytes, is_current_device, workspace_metrics,
+    Device, FileNode, FileVersion, SyncConflict, TrashEntry, file_version_label, format_bytes,
+    is_current_device, is_file_version_pinned, workspace_metrics,
 };
 use crate::sync_commands::sync_action_label;
 use crate::theme::alpha;
@@ -252,6 +253,13 @@ impl SyncHubDesktop {
                 cx,
             ))
             .child(self.render_nav_button("files", MainView::Files, IconName::File, "Files", cx))
+            .child(self.render_nav_button(
+                "versions",
+                MainView::Versions,
+                IconName::Calendar,
+                "Versions",
+                cx,
+            ))
             .child(self.render_nav_button("trash", MainView::Trash, IconName::Inbox, "Trash", cx))
             .child(self.render_nav_button("sync", MainView::Sync, IconName::Redo2, "Sync", cx))
             .child(self.render_nav_button(
@@ -282,6 +290,7 @@ impl SyncHubDesktop {
             MainView::Overview => self.render_overview(cx).into_any_element(),
             MainView::Sync => self.render_sync(cx).into_any_element(),
             MainView::Files => self.render_files(cx).into_any_element(),
+            MainView::Versions => self.render_versions(cx).into_any_element(),
             MainView::Trash => self.render_trash(cx).into_any_element(),
             MainView::Devices => self.render_devices(cx).into_any_element(),
             MainView::Conflicts => self.render_conflicts(cx).into_any_element(),
@@ -491,6 +500,56 @@ impl SyncHubDesktop {
                     .border_color(colors.border)
                     .rounded_md()
                     .children(file_rows),
+            )
+    }
+
+    fn render_versions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let version_rows = self
+            .file_versions
+            .iter()
+            .map(|version| self.render_file_version_row(version, cx).into_any_element())
+            .collect::<Vec<_>>();
+        let target = self
+            .selected_file
+            .as_ref()
+            .map(|file| file.path.as_str())
+            .unwrap_or("No remote file selected");
+
+        v_flex()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .p_3()
+                    .gap_2()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("File Versions").text_color(colors.text))
+                    .child(Label::new(target).text_color(colors.muted))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("load-file-versions")
+                            .icon(IconName::Redo2)
+                            .label("Load")
+                            .small()
+                            .disabled(self.loading || self.selected_file.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.refresh_selected_file_versions(cx)
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .mx_3()
+                    .mb_3()
+                    .overflow_y_scrollbar()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .children(version_rows),
             )
     }
 
@@ -846,6 +905,7 @@ impl SyncHubDesktop {
 
     fn render_file_row(&self, file: &FileNode, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let file_for_versions = file.clone();
         let file_for_download = file.clone();
         let file_for_move = file.clone();
         let file_for_delete = file.clone();
@@ -878,6 +938,16 @@ impl SyncHubDesktop {
             .child(Label::new(format_bytes(file.size)).text_color(colors.muted))
             .child(self.render_status_badge(format!("v{}", file.version).as_str()))
             .child(
+                Button::new(format!("versions-file-{}", file.id))
+                    .icon(IconName::Calendar)
+                    .ghost()
+                    .small()
+                    .disabled(self.loading || file.node_type != "file")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_file_versions(file_for_versions.clone(), cx)
+                    })),
+            )
+            .child(
                 Button::new(format!("download-file-{}", file.id))
                     .icon(IconName::ArrowDown)
                     .ghost()
@@ -906,6 +976,92 @@ impl SyncHubDesktop {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.delete_remote_file(file_for_delete.clone(), cx)
                     })),
+            )
+    }
+
+    fn render_file_version_row(
+        &self,
+        version: &FileVersion,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = self.colors;
+        let pinned = is_file_version_pinned(version);
+        let version_for_restore = version.clone();
+        let version_for_pin = version.clone();
+        let version_for_unpin = version.clone();
+        h_flex()
+            .gap_3()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                Icon::new(IconName::Calendar)
+                    .small()
+                    .text_color(colors.accent),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .child(Label::new(file_version_label(version)).text_color(colors.text))
+                    .child(
+                        Label::new(version.id.as_str())
+                            .text_color(colors.muted)
+                            .text_size(rems(0.72)),
+                    ),
+            )
+            .child(Label::new(format_bytes(version.size)).text_color(colors.muted))
+            .child(
+                Label::new(short_hash(&version.sha256))
+                    .text_color(colors.muted)
+                    .text_size(rems(0.72)),
+            )
+            .child(
+                Label::new(format_optional(version.created_at.as_deref())).text_color(colors.muted),
+            )
+            .child(self.render_status_badge(if pinned { "pinned" } else { "unpinned" }))
+            .child(
+                Button::new(format!(
+                    "restore-version-{}-{}",
+                    version.file_id, version.version
+                ))
+                .icon(IconName::Undo2)
+                .label("Restore")
+                .ghost()
+                .small()
+                .disabled(self.loading)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.restore_file_version(version_for_restore.clone(), cx)
+                })),
+            )
+            .child(
+                Button::new(format!(
+                    "pin-version-{}-{}",
+                    version.file_id, version.version
+                ))
+                .icon(IconName::Star)
+                .label("Pin")
+                .ghost()
+                .small()
+                .disabled(self.loading || pinned)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_file_version_pin(version_for_pin.clone(), true, cx)
+                })),
+            )
+            .child(
+                Button::new(format!(
+                    "unpin-version-{}-{}",
+                    version.file_id, version.version
+                ))
+                .icon(IconName::Close)
+                .label("Unpin")
+                .ghost()
+                .small()
+                .disabled(self.loading || !pinned)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_file_version_pin(version_for_unpin.clone(), false, cx)
+                })),
             )
     }
 

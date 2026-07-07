@@ -141,6 +141,28 @@ pub struct FileNode {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct FileVersionListData {
+    pub items: Vec<FileVersion>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct FileVersion {
+    pub id: String,
+    pub file_id: String,
+    pub version: i64,
+    pub size: i64,
+    pub sha256: String,
+    pub pinned_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct RestoreFileVersionData {
+    pub file: FileNode,
+    pub change_id: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SyncConflictListData {
     pub items: Vec<SyncConflict>,
 }
@@ -299,6 +321,18 @@ pub fn format_bytes(size: i64) -> String {
     } else {
         format!("{:.1} {}", value, units[unit])
     }
+}
+
+pub fn file_version_label(version: &FileVersion) -> String {
+    format!("v{}", version.version)
+}
+
+pub fn is_file_version_pinned(version: &FileVersion) -> bool {
+    version
+        .pinned_at
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 pub fn compose_remote_directory_path(input: &str, workspace_remote: &str) -> Option<String> {

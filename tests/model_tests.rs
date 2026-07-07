@@ -1,8 +1,9 @@
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::models::{
-    Device, Manifest, ManifestEntry, WorkspaceConfig, WorkspaceRegistryEntry, WorkspaceSnapshot,
-    compose_remote_directory_path, conflict_resolution_label, format_bytes, is_current_device,
-    is_success_code, workspace_metrics,
+    Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig, WorkspaceRegistryEntry,
+    WorkspaceSnapshot, compose_remote_directory_path, conflict_resolution_label,
+    file_version_label, format_bytes, is_current_device, is_file_version_pinned, is_success_code,
+    workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     file_download_command_args, parse_workspace_paths, sync_command_args, trash_list_command_args,
@@ -65,6 +66,24 @@ fn api_success_codes_match_synchub_envelope() {
 fn bytes_are_human_readable() {
     assert_eq!(format_bytes(512), "512 B");
     assert_eq!(format_bytes(2048), "2.0 KB");
+}
+
+#[test]
+fn file_version_helpers_are_human_readable() {
+    let pinned = FileVersion {
+        version: 7,
+        pinned_at: Some("2026-07-07T00:00:00Z".to_string()),
+        ..FileVersion::default()
+    };
+    let unpinned = FileVersion {
+        version: 8,
+        pinned_at: None,
+        ..FileVersion::default()
+    };
+
+    assert_eq!(file_version_label(&pinned), "v7");
+    assert!(is_file_version_pinned(&pinned));
+    assert!(!is_file_version_pinned(&unpinned));
 }
 
 #[test]

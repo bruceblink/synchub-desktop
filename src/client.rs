@@ -1,6 +1,7 @@
 use crate::models::{
-    ApiEnvelope, ApiStatus, CliConfig, DeviceListData, FileListData, FileNode, LoginData,
-    SyncConflict, SyncConflictListData, TokenPair, is_success_code,
+    ApiEnvelope, ApiStatus, CliConfig, DeviceListData, FileListData, FileNode, FileVersion,
+    FileVersionListData, LoginData, RestoreFileVersionData, SyncConflict, SyncConflictListData,
+    TokenPair, is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -123,6 +124,69 @@ impl SyncHubClient {
             Some(device_body(device_id)),
         )
         .await
+    }
+
+    pub async fn list_file_versions(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        limit: u32,
+    ) -> Result<FileVersionListData> {
+        let path = format!(
+            "/api/v1/files/{}/versions?limit={}",
+            url_escape(file_id),
+            limit
+        );
+        self.request_json(Method::GET, &path, Some(access_token), None)
+            .await
+    }
+
+    pub async fn restore_file_version(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        version: i64,
+        device_id: Option<&str>,
+    ) -> Result<RestoreFileVersionData> {
+        let path = format!(
+            "/api/v1/files/{}/versions/{version}/restore",
+            url_escape(file_id)
+        );
+        self.request_json(
+            Method::POST,
+            &path,
+            Some(access_token),
+            Some(device_body(device_id)),
+        )
+        .await
+    }
+
+    pub async fn pin_file_version(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        version: i64,
+    ) -> Result<FileVersion> {
+        let path = format!(
+            "/api/v1/files/{}/versions/{version}/pin",
+            url_escape(file_id)
+        );
+        self.request_json(Method::POST, &path, Some(access_token), Some(json!({})))
+            .await
+    }
+
+    pub async fn unpin_file_version(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        version: i64,
+    ) -> Result<FileVersion> {
+        let path = format!(
+            "/api/v1/files/{}/versions/{version}/pin",
+            url_escape(file_id)
+        );
+        self.request_json(Method::DELETE, &path, Some(access_token), None)
+            .await
     }
 
     pub async fn list_conflicts(
@@ -255,6 +319,18 @@ fn endpoint(base_url: &str, path: &str) -> String {
     )
 }
 
+fn url_escape(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
 fn parse_rfc3339_utc(value: &str) -> Option<SystemTime> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -332,5 +408,11 @@ mod tests {
     fn device_body_omits_empty_device_id() {
         assert_eq!(device_body(Some("dev_1")), json!({ "device_id": "dev_1" }));
         assert_eq!(device_body(Some("")), json!({}));
+    }
+
+    #[test]
+    fn url_escape_encodes_path_segments() {
+        assert_eq!(url_escape("file 1/版本"), "file%201%2F%E7%89%88%E6%9C%AC");
+        assert_eq!(url_escape("abc-_.~"), "abc-_.~");
     }
 }

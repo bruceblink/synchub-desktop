@@ -7,7 +7,9 @@ mod view;
 use crate::config::{
     DesktopSettings, default_cli_config_path, default_workspace_registry_path, load_settings,
 };
-use crate::models::{CliConfig, Device, FileNode, SyncConflict, TrashEntry, WorkspaceSnapshot};
+use crate::models::{
+    CliConfig, Device, FileNode, FileVersion, SyncConflict, TrashEntry, WorkspaceSnapshot,
+};
 use crate::theme::ThemeColors;
 use gpui::*;
 use gpui_component::input::InputState;
@@ -18,6 +20,7 @@ enum MainView {
     Overview,
     Sync,
     Files,
+    Versions,
     Trash,
     Devices,
     Conflicts,
@@ -53,6 +56,8 @@ pub struct SyncHubDesktop {
     selected_workspace: usize,
     api_status: Option<String>,
     files: Vec<FileNode>,
+    selected_file: Option<FileNode>,
+    file_versions: Vec<FileVersion>,
     trash_entries: Vec<TrashEntry>,
     devices: Vec<Device>,
     conflicts: Vec<SyncConflict>,
@@ -104,6 +109,8 @@ impl SyncHubDesktop {
             selected_workspace: 0,
             api_status: None,
             files: Vec::new(),
+            selected_file: None,
+            file_versions: Vec::new(),
             trash_entries: Vec::new(),
             devices: Vec::new(),
             conflicts: Vec::new(),

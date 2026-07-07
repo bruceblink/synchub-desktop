@@ -9,8 +9,8 @@ use crate::config::{
     load_cli_config, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
 };
 use crate::models::{
-    CliConfig, Device, FileNode, SyncConflict, TrashEntry, compose_remote_directory_path,
-    conflict_resolution_label,
+    CliConfig, Device, FileNode, FileVersion, SyncConflict, TrashEntry,
+    compose_remote_directory_path, conflict_resolution_label, file_version_label,
 };
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
@@ -168,6 +168,8 @@ impl SyncHubDesktop {
                             Ok(()) => {
                                 this.cli_config = None;
                                 this.files.clear();
+                                this.selected_file = None;
+                                this.file_versions.clear();
                                 this.trash_entries.clear();
                                 this.devices.clear();
                                 this.conflicts.clear();
@@ -209,6 +211,16 @@ impl SyncHubDesktop {
                             Ok((config, files)) => {
                                 this.cli_config = Some(config);
                                 this.files = files;
+                                this.selected_file = this
+                                    .selected_file
+                                    .as_ref()
+                                    .and_then(|selected| {
+                                        this.files.iter().find(|file| file.id == selected.id)
+                                    })
+                                    .cloned();
+                                if this.selected_file.is_none() {
+                                    this.file_versions.clear();
+                                }
                                 this.message = format!("loaded {} remote files", this.files.len());
                             }
                             Err(error) => this.message = format!("load files failed: {error}"),
@@ -285,6 +297,231 @@ impl SyncHubDesktop {
         .detach();
     }
 
+    pub(super) fn show_file_versions(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        if file.node_type != "file" {
+            self.set_message("only remote files have version history", cx);
+            return;
+        }
+        self.selected_file = Some(file.clone());
+        self.file_versions.clear();
+        self.active_view = super::MainView::Versions;
+        self.refresh_file_versions(file, cx);
+    }
+
+    pub(super) fn refresh_selected_file_versions(&mut self, cx: &mut Context<Self>) {
+        let Some(file) = self.selected_file.clone() else {
+            self.set_message("select a remote file before loading versions", cx);
+            return;
+        };
+        self.refresh_file_versions(file, cx);
+    }
+
+    fn refresh_file_versions(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before loading file versions", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = self
+            .current_workspace()
+            .map(|workspace| workspace.server_url(&config.server_url))
+            .unwrap_or_else(|| config.server_url.clone());
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let data = client
+                        .list_file_versions(&config.tokens.access_token, &file.id, 100)
+                        .await?;
+                    Ok::<(CliConfig, FileNode, Vec<FileVersion>), anyhow::Error>((
+                        config, file, data.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, file, versions)) => {
+                                this.cli_config = Some(config);
+                                this.selected_file = Some(file.clone());
+                                this.file_versions = versions;
+                                this.message = format!(
+                                    "loaded {} version(s) for {}",
+                                    this.file_versions.len(),
+                                    file.path
+                                );
+                            }
+                            Err(error) => {
+                                this.message = format!("load file versions failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn restore_file_version(&mut self, version: FileVersion, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before restoring a file version", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before restoring a file version", cx);
+            return;
+        };
+        let Some(file) = self.selected_file.clone() else {
+            self.set_message("select a remote file before restoring a version", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result =
+                    async {
+                        let changed = refresh_cli_config_if_needed(&mut config).await?;
+                        if changed {
+                            save_cli_config(&config_path, &config)?;
+                        }
+                        let server = workspace.server_url(&config.server_url);
+                        let client = SyncHubClient::new(server)?;
+                        let restored = client
+                            .restore_file_version(
+                                &config.tokens.access_token,
+                                &file.id,
+                                version.version,
+                                Some(device_id.as_str()),
+                            )
+                            .await?;
+                        let versions = client
+                            .list_file_versions(&config.tokens.access_token, &file.id, 100)
+                            .await?;
+                        let files = client.list_files(&config.tokens.access_token, 100).await?;
+                        Ok::<(CliConfig, FileNode, Vec<FileVersion>, Vec<FileNode>), anyhow::Error>(
+                            (config, restored.file, versions.items, files.items),
+                        )
+                    }
+                    .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, restored, versions, files)) => {
+                                this.cli_config = Some(config);
+                                this.selected_file = Some(restored.clone());
+                                this.file_versions = versions;
+                                this.files = files;
+                                this.message = format!(
+                                    "restored {} to {}",
+                                    restored.path,
+                                    file_version_label(&version)
+                                );
+                            }
+                            Err(error) => {
+                                this.message = format!("restore file version failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn set_file_version_pin(
+        &mut self,
+        version: FileVersion,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before updating a file version", cx);
+            return;
+        };
+        let Some(file) = self.selected_file.clone() else {
+            self.set_message("select a remote file before updating a version", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = self
+            .current_workspace()
+            .map(|workspace| workspace.server_url(&config.server_url))
+            .unwrap_or_else(|| config.server_url.clone());
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let updated = if pinned {
+                        client
+                            .pin_file_version(
+                                &config.tokens.access_token,
+                                &file.id,
+                                version.version,
+                            )
+                            .await?
+                    } else {
+                        client
+                            .unpin_file_version(
+                                &config.tokens.access_token,
+                                &file.id,
+                                version.version,
+                            )
+                            .await?
+                    };
+                    let versions = client
+                        .list_file_versions(&config.tokens.access_token, &file.id, 100)
+                        .await?;
+                    Ok::<(CliConfig, FileVersion, Vec<FileVersion>), anyhow::Error>((
+                        config,
+                        updated,
+                        versions.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, updated, versions)) => {
+                                this.cli_config = Some(config);
+                                this.file_versions = versions;
+                                this.message = format!(
+                                    "{} {}",
+                                    if pinned { "pinned" } else { "unpinned" },
+                                    file_version_label(&updated)
+                                );
+                            }
+                            Err(error) => {
+                                this.message = format!("update file version failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn delete_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
         let Some(mut config) = self.cli_config.clone() else {
             self.set_message("sign in before deleting a remote item", cx);
@@ -329,6 +566,15 @@ impl SyncHubDesktop {
                             Ok((config, file, files)) => {
                                 this.cli_config = Some(config);
                                 this.files = files;
+                                if this
+                                    .selected_file
+                                    .as_ref()
+                                    .map(|selected| selected.id == file.id)
+                                    .unwrap_or(false)
+                                {
+                                    this.selected_file = None;
+                                    this.file_versions.clear();
+                                }
                                 this.message = format!("deleted remote item {}", file.path);
                             }
                             Err(error) => {
@@ -395,6 +641,14 @@ impl SyncHubDesktop {
                             Ok((config, old, moved, files)) => {
                                 this.cli_config = Some(config);
                                 this.files = files;
+                                if this
+                                    .selected_file
+                                    .as_ref()
+                                    .map(|selected| selected.id == moved.id)
+                                    .unwrap_or(false)
+                                {
+                                    this.selected_file = Some(moved.clone());
+                                }
                                 this.message =
                                     format!("moved remote item {} -> {}", old.path, moved.path);
                             }
