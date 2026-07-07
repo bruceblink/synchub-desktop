@@ -7,6 +7,7 @@ use crate::models::{
     CliConfig, FileNode, SyncConflict, WorkspaceSnapshot, conflict_resolution_label, format_bytes,
     workspace_metrics,
 };
+use crate::sync_commands::{sync_action_label, sync_command_args};
 use crate::theme::{ThemeColors, alpha};
 use gpui::prelude::*;
 use gpui::*;
@@ -25,6 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainView {
     Overview,
+    Sync,
     Files,
     Conflicts,
     Daemon,
@@ -427,6 +429,41 @@ impl SyncHubDesktop {
         .detach();
     }
 
+    fn run_sync_command(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        let workspace_root = self
+            .current_workspace()
+            .map(|workspace| workspace.root_path())
+            .unwrap_or_else(|| PathBuf::from(self.workspace_input.read(cx).value().as_ref()));
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_sync(action, &workspace_root, &config_path)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("sync command failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn run_daemon_command(&mut self, action: &str, cx: &mut Context<Self>) {
         let workspace_root = self
             .current_workspace()
@@ -744,6 +781,7 @@ impl SyncHubDesktop {
                 cx,
             ))
             .child(self.render_nav_button("files", MainView::Files, IconName::File, "Files", cx))
+            .child(self.render_nav_button("sync", MainView::Sync, IconName::Redo2, "Sync", cx))
             .child(self.render_nav_button(
                 "conflicts",
                 MainView::Conflicts,
@@ -763,6 +801,7 @@ impl SyncHubDesktop {
     fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.active_view {
             MainView::Overview => self.render_overview(cx).into_any_element(),
+            MainView::Sync => self.render_sync(cx).into_any_element(),
             MainView::Files => self.render_files(cx).into_any_element(),
             MainView::Conflicts => self.render_conflicts(cx).into_any_element(),
             MainView::Daemon => self.render_daemon(cx).into_any_element(),
@@ -852,6 +891,65 @@ impl SyncHubDesktop {
                         )
                     }),
             )
+    }
+
+    fn render_sync(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.colors;
+        let controls = h_flex()
+            .gap_2()
+            .child(self.render_sync_button("sync-once", "once", IconName::Redo2, false, cx))
+            .child(self.render_sync_button("sync-dry-run", "dry-run", IconName::Search, true, cx))
+            .child(self.render_sync_button("sync-push", "push", IconName::ArrowUp, true, cx))
+            .child(self.render_sync_button("sync-pull", "pull", IconName::ArrowDown, true, cx))
+            .child(self.render_sync_button("sync-status", "status", IconName::Info, true, cx))
+            .child(self.render_sync_button("sync-doctor", "doctor", IconName::Check, true, cx))
+            .into_any_element();
+        let workspace = v_flex()
+            .gap_2()
+            .p_4()
+            .bg(colors.panel)
+            .border_1()
+            .border_color(colors.border)
+            .rounded_md()
+            .child(Label::new("Workspace").text_color(colors.text))
+            .child(self.render_workspace_detail())
+            .into_any_element();
+        let command_output = v_flex()
+            .gap_2()
+            .p_4()
+            .flex_1()
+            .overflow_y_scrollbar()
+            .bg(colors.panel)
+            .border_1()
+            .border_color(colors.border)
+            .rounded_md()
+            .child(Label::new("Last sync command").text_color(colors.text))
+            .child(
+                Label::new(if self.message.is_empty() {
+                    "Ready"
+                } else {
+                    &self.message
+                })
+                .text_color(colors.muted),
+            )
+            .when_some(self.command_result.as_ref(), |this, result| {
+                this.child(
+                    Label::new(result.output.as_str())
+                        .text_color(colors.muted)
+                        .text_size(rems(0.78)),
+                )
+            })
+            .into_any_element();
+
+        v_flex()
+            .size_full()
+            .gap_3()
+            .p_4()
+            .bg(colors.bg)
+            .child(controls)
+            .child(workspace)
+            .child(command_output)
+            .into_any_element()
     }
 
     fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1263,6 +1361,23 @@ impl SyncHubDesktop {
             )
     }
 
+    fn render_sync_button(
+        &self,
+        id: &'static str,
+        action: &'static str,
+        icon: IconName,
+        ghost: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        Button::new(id)
+            .icon(icon)
+            .label(sync_action_label(action))
+            .when(ghost, |button| button.ghost())
+            .disabled(self.loading)
+            .on_click(cx.listener(move |this, _, _, cx| this.run_sync_command(action, cx)))
+            .into_any_element()
+    }
+
     fn render_status_badge(&self, text: &str) -> impl IntoElement {
         let colors = self.colors;
         let lower = text.to_ascii_lowercase();
@@ -1378,6 +1493,30 @@ fn run_synchub_cli_workspace_init(root: &str, config_path: &PathBuf) -> CommandR
         "synchub-cli",
         &["workspace", "init", "--path", root, "--config", &config],
     )
+}
+
+fn run_synchub_cli_sync(
+    action: &str,
+    workspace_root: &PathBuf,
+    config_path: &PathBuf,
+) -> CommandResult {
+    let root = workspace_root.display().to_string();
+    let config = config_path.display().to_string();
+    let Some(args) = sync_command_args(action, &root, &config) else {
+        return CommandResult {
+            ok: false,
+            summary: format!("unknown sync action: {action}"),
+            output: String::new(),
+        };
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    result.summary = if result.ok {
+        format!("{} completed", sync_action_label(action))
+    } else {
+        format!("{} failed: {}", sync_action_label(action), result.summary)
+    };
+    result
 }
 
 fn run_command(program: &str, args: &[&str]) -> CommandResult {

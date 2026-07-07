@@ -3,6 +3,7 @@ use synchub_desktop::models::{
     Manifest, ManifestEntry, WorkspaceRegistryEntry, WorkspaceSnapshot, conflict_resolution_label,
     format_bytes, is_success_code, workspace_metrics,
 };
+use synchub_desktop::sync_commands::sync_command_args;
 
 #[test]
 fn base_url_is_normalized() {
@@ -69,4 +70,42 @@ fn conflict_resolution_labels_are_human_readable() {
     assert_eq!(conflict_resolution_label("keep_remote"), "keep remote");
     assert_eq!(conflict_resolution_label("keep_both"), "keep both");
     assert_eq!(conflict_resolution_label("other"), "unknown");
+}
+
+#[test]
+fn sync_command_args_include_workspace_and_config() {
+    assert_eq!(
+        sync_command_args("dry-run", "C:/work", "C:/cfg/config.json").expect("dry-run args"),
+        vec![
+            "sync",
+            "once",
+            "--dry-run",
+            "--path",
+            "C:/work",
+            "--config",
+            "C:/cfg/config.json",
+        ]
+    );
+}
+
+#[test]
+fn status_sync_command_includes_remote_context() {
+    assert_eq!(
+        sync_command_args("status", "C:/work", "C:/cfg/config.json").expect("status args"),
+        vec![
+            "sync",
+            "status",
+            "--show-remote",
+            "--show-conflicts",
+            "--path",
+            "C:/work",
+            "--config",
+            "C:/cfg/config.json",
+        ]
+    );
+}
+
+#[test]
+fn unknown_sync_command_is_rejected() {
+    assert!(sync_command_args("bogus", "C:/work", "C:/cfg/config.json").is_none());
 }

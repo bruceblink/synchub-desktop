@@ -9,6 +9,7 @@ SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust proje
 - Discover registered workspaces from the CLI registry.
 - Show workspace manifest, pending local changes, trash, daemon state, and pending remote conflicts.
 - List remote files for the selected workspace.
+- Run common sync commands for the selected workspace: status, doctor, dry run, sync once, push, and pull.
 - Start, pause, resume, and inspect the SyncHub CLI daemon by shelling out to `synchub-cli`.
 
 ## Build

@@ -1,10 +1,11 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 pub mod app;
 pub mod assets;
 pub mod client;
 pub mod config;
 pub mod models;
+pub mod sync_commands;
 pub mod theme;
 
 use app::SyncHubDesktop;
