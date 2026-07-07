@@ -55,6 +55,43 @@ pub fn workspace_init_command_args(
     Some(args)
 }
 
+pub fn file_download_command_args(
+    root: &str,
+    workspace_config: &str,
+    config: &str,
+    file_id: &str,
+) -> Option<Vec<String>> {
+    let root = root.trim();
+    let file_id = file_id.trim();
+    if root.is_empty() || file_id.is_empty() {
+        return None;
+    }
+
+    let mut args = vec![
+        "file".to_string(),
+        "download".to_string(),
+        "--path".to_string(),
+        root.to_string(),
+    ];
+    let workspace_config = workspace_config.trim();
+    if !workspace_config.is_empty() {
+        args.extend([
+            "--workspace-config".to_string(),
+            workspace_config.to_string(),
+        ]);
+    }
+    let config = config.trim();
+    if !config.is_empty() {
+        args.extend(["--config".to_string(), config.to_string()]);
+    }
+    args.extend([
+        "--file-id".to_string(),
+        file_id.to_string(),
+        "--json".to_string(),
+    ]);
+    Some(args)
+}
+
 pub fn trash_list_command_args(
     root: &str,
     workspace_config: &str,

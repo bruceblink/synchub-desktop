@@ -9,8 +9,8 @@ use crate::models::{
     workspace_metrics,
 };
 use crate::sync_commands::{
-    parse_workspace_paths, sync_action_label, sync_command_args, trash_list_command_args,
-    trash_restore_command_args, workspace_init_command_args,
+    file_download_command_args, parse_workspace_paths, sync_action_label, sync_command_args,
+    trash_list_command_args, trash_restore_command_args, workspace_init_command_args,
 };
 use crate::theme::{ThemeColors, alpha};
 use gpui::prelude::*;
@@ -534,6 +534,52 @@ impl SyncHubDesktop {
                             Err(error) => {
                                 this.message = format!("move remote item failed: {error}")
                             }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn download_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before downloading a remote file", cx);
+            return;
+        };
+        if file.node_type != "file" {
+            self.set_message("only remote files can be downloaded", cx);
+            return;
+        }
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_file_download(
+                        &workspace_root,
+                        &workspace_config,
+                        &config_path,
+                        &file,
+                    )
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("download failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
                         }
                         cx.notify();
                     });
@@ -1727,6 +1773,7 @@ impl SyncHubDesktop {
 
     fn render_file_row(&self, file: &FileNode, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let file_for_download = file.clone();
         let file_for_move = file.clone();
         let file_for_delete = file.clone();
         h_flex()
@@ -1757,6 +1804,16 @@ impl SyncHubDesktop {
             )
             .child(Label::new(format_bytes(file.size)).text_color(colors.muted))
             .child(self.render_status_badge(format!("v{}", file.version).as_str()))
+            .child(
+                Button::new(format!("download-file-{}", file.id))
+                    .icon(IconName::ArrowDown)
+                    .ghost()
+                    .small()
+                    .disabled(self.loading || file.node_type != "file")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.download_remote_file(file_for_download.clone(), cx)
+                    })),
+            )
             .child(
                 Button::new(format!("move-file-{}", file.id))
                     .icon(IconName::ArrowRight)
@@ -2054,6 +2111,32 @@ impl Render for SyncHubDesktop {
                     ),
             )
     }
+}
+
+fn run_synchub_cli_file_download(
+    workspace_root: &PathBuf,
+    workspace_config: &PathBuf,
+    config_path: &PathBuf,
+    file: &FileNode,
+) -> CommandResult {
+    let root = workspace_root.display().to_string();
+    let workspace_config = workspace_config.display().to_string();
+    let config = config_path.display().to_string();
+    let Some(args) = file_download_command_args(&root, &workspace_config, &config, &file.id) else {
+        return CommandResult {
+            ok: false,
+            summary: "remote file id is required".to_string(),
+            output: String::new(),
+        };
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    if result.ok {
+        result.summary = format!("downloaded remote file {}", file.path);
+    } else {
+        result.summary = format!("download failed: {}", result.summary);
+    }
+    result
 }
 
 fn run_synchub_cli_trash_list(
