@@ -1,6 +1,6 @@
 use crate::models::{
-    ApiEnvelope, ApiStatus, CliConfig, DeviceListData, FileListData, LoginData, SyncConflict,
-    SyncConflictListData, TokenPair, is_success_code,
+    ApiEnvelope, ApiStatus, CliConfig, DeviceListData, FileListData, FileNode, LoginData,
+    SyncConflict, SyncConflictListData, TokenPair, is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -75,6 +75,21 @@ impl SyncHubClient {
         let path = format!("/api/v1/files?page_size={}", page_size);
         self.request_json(Method::GET, &path, Some(access_token), None)
             .await
+    }
+
+    pub async fn create_directory(
+        &self,
+        access_token: &str,
+        path: &str,
+        device_id: Option<&str>,
+    ) -> Result<FileNode> {
+        self.request_json(
+            Method::POST,
+            "/api/v1/files/directories",
+            Some(access_token),
+            Some(create_directory_body(path, device_id)),
+        )
+        .await
     }
 
     pub async fn list_conflicts(
@@ -153,6 +168,14 @@ impl SyncHubClient {
             .data
             .ok_or_else(|| anyhow!("response data is empty"))
     }
+}
+
+fn create_directory_body(path: &str, device_id: Option<&str>) -> serde_json::Value {
+    let mut body = json!({ "path": path });
+    if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+        body["device_id"] = json!(device_id);
+    }
+    body
 }
 
 pub async fn refresh_cli_config_if_needed(config: &mut CliConfig) -> Result<bool> {
@@ -252,6 +275,18 @@ mod tests {
         assert_eq!(
             normalize_base_url("https://sync.example/"),
             "https://sync.example"
+        );
+    }
+
+    #[test]
+    fn create_directory_body_omits_empty_device_id() {
+        assert_eq!(
+            create_directory_body("/workspace/docs", Some("dev_1")),
+            json!({ "path": "/workspace/docs", "device_id": "dev_1" })
+        );
+        assert_eq!(
+            create_directory_body("/workspace/docs", Some("")),
+            json!({ "path": "/workspace/docs" })
         );
     }
 }

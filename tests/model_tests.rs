@@ -1,7 +1,8 @@
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::models::{
     Device, Manifest, ManifestEntry, WorkspaceConfig, WorkspaceRegistryEntry, WorkspaceSnapshot,
-    conflict_resolution_label, format_bytes, is_current_device, is_success_code, workspace_metrics,
+    compose_remote_directory_path, conflict_resolution_label, format_bytes, is_current_device,
+    is_success_code, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     parse_workspace_paths, sync_command_args, workspace_init_command_args,
@@ -63,6 +64,23 @@ fn api_success_codes_match_synchub_envelope() {
 fn bytes_are_human_readable() {
     assert_eq!(format_bytes(512), "512 B");
     assert_eq!(format_bytes(2048), "2.0 KB");
+}
+
+#[test]
+fn remote_directory_path_is_composed_from_workspace_base() {
+    assert_eq!(
+        compose_remote_directory_path("docs/notes", "/workspace").as_deref(),
+        Some("/workspace/docs/notes")
+    );
+    assert_eq!(
+        compose_remote_directory_path("/archive/docs", "/workspace").as_deref(),
+        Some("/archive/docs")
+    );
+    assert_eq!(
+        compose_remote_directory_path("../secret", "/workspace"),
+        None
+    );
+    assert_eq!(compose_remote_directory_path("/", "/workspace"), None);
 }
 
 #[test]

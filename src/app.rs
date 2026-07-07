@@ -4,8 +4,8 @@ use crate::config::{
     load_settings, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
 };
 use crate::models::{
-    CliConfig, Device, FileNode, SyncConflict, WorkspaceSnapshot, conflict_resolution_label,
-    format_bytes, is_current_device, workspace_metrics,
+    CliConfig, Device, FileNode, SyncConflict, WorkspaceSnapshot, compose_remote_directory_path,
+    conflict_resolution_label, format_bytes, is_current_device, workspace_metrics,
 };
 use crate::sync_commands::{
     parse_workspace_paths, sync_action_label, sync_command_args, workspace_init_command_args,
@@ -54,6 +54,7 @@ pub struct SyncHubDesktop {
     password_input: Entity<InputState>,
     workspace_input: Entity<InputState>,
     remote_root_input: Entity<InputState>,
+    remote_directory_input: Entity<InputState>,
     settings: DesktopSettings,
     cli_config_path: PathBuf,
     registry_path: PathBuf,
@@ -89,6 +90,8 @@ impl SyncHubDesktop {
         let workspace_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Workspace paths"));
         let remote_root_input = cx.new(|cx| InputState::new(window, cx).placeholder("Remote root"));
+        let remote_directory_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("New remote folder"));
 
         let cli_config_path = default_cli_config_path();
         let registry_path = default_workspace_registry_path(&cli_config_path);
@@ -98,6 +101,7 @@ impl SyncHubDesktop {
             password_input,
             workspace_input,
             remote_root_input,
+            remote_directory_input,
             settings,
             cli_config_path,
             registry_path,
@@ -330,6 +334,70 @@ impl SyncHubDesktop {
                                 this.message = format!("loaded {} remote files", this.files.len());
                             }
                             Err(error) => this.message = format!("load files failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn create_remote_directory(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before creating a remote folder", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before creating a remote folder", cx);
+            return;
+        };
+        let input = self.remote_directory_input.read(cx).value().to_string();
+        let Some(remote_path) = compose_remote_directory_path(&input, &workspace.remote_path())
+        else {
+            self.set_message("remote folder path is invalid", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    let node = client
+                        .create_directory(
+                            &config.tokens.access_token,
+                            &remote_path,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        node,
+                        files.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, node, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message = format!("created remote folder {}", node.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("create remote folder failed: {error}")
+                            }
                         }
                         cx.notify();
                     });
@@ -1028,9 +1096,26 @@ impl SyncHubDesktop {
             .child(
                 h_flex()
                     .p_3()
+                    .gap_2()
                     .justify_between()
                     .items_center()
                     .child(Label::new("Remote Files").text_color(colors.text))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .w(px(220.))
+                            .child(Input::new(&self.remote_directory_input)),
+                    )
+                    .child(
+                        Button::new("create-remote-directory")
+                            .icon(IconName::Plus)
+                            .label("New Folder")
+                            .small()
+                            .disabled(self.loading)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.create_remote_directory(cx)),
+                            ),
+                    )
                     .child(
                         Button::new("load-files")
                             .icon(IconName::Redo2)

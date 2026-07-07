@@ -280,6 +280,48 @@ pub fn format_bytes(size: i64) -> String {
     }
 }
 
+pub fn compose_remote_directory_path(input: &str, workspace_remote: &str) -> Option<String> {
+    let input = input
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .replace('\\', "/");
+    if input.is_empty() || input.contains('\0') {
+        return None;
+    }
+
+    let path = if input.starts_with('/') {
+        input
+    } else {
+        let base = workspace_remote.trim().replace('\\', "/");
+        if base.is_empty() || base == "/" {
+            format!("/{}", input.trim_start_matches('/'))
+        } else {
+            format!(
+                "{}/{}",
+                base.trim_end_matches('/'),
+                input.trim_start_matches('/')
+            )
+        }
+    };
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return None;
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("/{}", parts.join("/")))
+}
+
 pub fn conflict_resolution_label(resolution: &str) -> &'static str {
     match resolution {
         "pending" => "pending",
