@@ -1,0 +1,807 @@
+use super::commands::{
+    run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_sync,
+    run_synchub_cli_trash_list, run_synchub_cli_trash_restore, run_synchub_cli_workspace_init,
+};
+use super::time::rfc3339_from_system_time;
+use super::{AuthMode, CommandResult, SyncHubDesktop};
+use crate::client::{SyncHubClient, refresh_cli_config_if_needed};
+use crate::config::{
+    load_cli_config, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
+};
+use crate::models::{
+    CliConfig, Device, FileNode, SyncConflict, TrashEntry, compose_remote_directory_path,
+    conflict_resolution_label,
+};
+use crate::sync_commands::parse_workspace_paths;
+use gpui::*;
+use std::path::PathBuf;
+use std::time::SystemTime;
+impl SyncHubDesktop {
+    pub(super) fn reload_local_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cli_config = match load_cli_config(&self.cli_config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                self.message = format!("read login config failed: {error}");
+                None
+            }
+        };
+        if let Some(config) = &self.cli_config {
+            self.server_input.update(cx, |input, cx| {
+                input.set_value(config.server_url.clone(), window, cx);
+            });
+            self.settings.server_url = config.server_url.clone();
+        }
+        self.workspaces = match load_workspace_snapshots(&self.registry_path) {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                self.message = format!("read workspace registry failed: {error}");
+                Vec::new()
+            }
+        };
+        if self.selected_workspace >= self.workspaces.len() {
+            self.selected_workspace = 0;
+        }
+        if let Some(workspace) = self.current_workspace() {
+            let root = workspace.root_path().display().to_string();
+            self.workspace_input.update(cx, |input, cx| {
+                input.set_value(root, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_local_state(window, cx);
+        self.refresh_api(cx);
+        self.refresh_files(cx);
+        self.refresh_trash(cx);
+        self.refresh_devices(cx);
+        self.refresh_conflicts(cx);
+    }
+
+    pub(super) fn refresh_api(&mut self, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let client = SyncHubClient::new(server)?;
+                    client.ready().await
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok(status) => {
+                                this.api_status = Some(if status.status.is_empty() {
+                                    "ready".to_string()
+                                } else {
+                                    status.status
+                                });
+                                this.message = "API is ready".to_string();
+                            }
+                            Err(error) => {
+                                this.api_status = Some("unreachable".to_string());
+                                this.message = format!("API check failed: {error}");
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn authenticate(&mut self, mode: AuthMode, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        let email = self.email_input.read(cx).value().to_string();
+        let password = self.password_input.read(cx).value().to_string();
+        let config_path = self.cli_config_path.clone();
+        self.auth_mode = mode;
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let client = SyncHubClient::new(&server)?;
+                    let data = match mode {
+                        AuthMode::Login => client.login(&email, &password).await?,
+                        AuthMode::Register => client.register(&email, &password).await?,
+                    };
+                    let now = SystemTime::now();
+                    let cfg = CliConfig {
+                        server_url: client.base_url().to_string(),
+                        user: data.user,
+                        access_token_expires_at: Some(rfc3339_from_system_time(
+                            data.tokens.access_token_expires_at(now),
+                        )),
+                        updated_at: Some(rfc3339_from_system_time(now)),
+                        tokens: data.tokens,
+                    };
+                    save_cli_config(&config_path, &cfg)?;
+                    Ok::<CliConfig, anyhow::Error>(cfg)
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok(config) => {
+                                let email = config.user.email.clone();
+                                this.cli_config = Some(config);
+                                this.message = format!("signed in as {email}");
+                            }
+                            Err(error) => this.message = format!("auth failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn logout(&mut self, cx: &mut Context<Self>) {
+        let config = self.cli_config.clone();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    if let Some(config) = &config {
+                        if !config.tokens.refresh_token.trim().is_empty() {
+                            let client = SyncHubClient::new(&config.server_url)?;
+                            let _ = client.logout(&config.tokens.refresh_token).await;
+                        }
+                    }
+                    remove_cli_config(&config_path)
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok(()) => {
+                                this.cli_config = None;
+                                this.files.clear();
+                                this.trash_entries.clear();
+                                this.devices.clear();
+                                this.conflicts.clear();
+                                this.message = "signed out".to_string();
+                            }
+                            Err(error) => this.message = format!("logout failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(&config.server_url)?;
+                    let data = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, Vec<FileNode>), anyhow::Error>((config, data.items))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message = format!("loaded {} remote files", this.files.len());
+                            }
+                            Err(error) => this.message = format!("load files failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn create_remote_directory(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before creating a remote folder", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before creating a remote folder", cx);
+            return;
+        };
+        let input = self.remote_directory_input.read(cx).value().to_string();
+        let Some(remote_path) = compose_remote_directory_path(&input, &workspace.remote_path())
+        else {
+            self.set_message("remote folder path is invalid", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    let node = client
+                        .create_directory(
+                            &config.tokens.access_token,
+                            &remote_path,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        node,
+                        files.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, node, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message = format!("created remote folder {}", node.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("create remote folder failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn delete_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before deleting a remote item", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before deleting a remote item", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    client
+                        .delete_file(
+                            &config.tokens.access_token,
+                            &file.id,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        file,
+                        files.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, file, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message = format!("deleted remote item {}", file.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("delete remote item failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn move_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before moving a remote item", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before moving a remote item", cx);
+            return;
+        };
+        let input = self.remote_target_input.read(cx).value().to_string();
+        let Some(target_path) = compose_remote_directory_path(&input, &workspace.remote_path())
+        else {
+            self.set_message("move target path is invalid", cx);
+            return;
+        };
+        let device_id = workspace.device_id();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    let moved = client
+                        .move_file(
+                            &config.tokens.access_token,
+                            &file.id,
+                            &target_path,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    Ok::<(CliConfig, FileNode, FileNode, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        file,
+                        moved,
+                        files.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, old, moved, files)) => {
+                                this.cli_config = Some(config);
+                                this.files = files;
+                                this.message =
+                                    format!("moved remote item {} -> {}", old.path, moved.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("move remote item failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn download_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before downloading a remote file", cx);
+            return;
+        };
+        if file.node_type != "file" {
+            self.set_message("only remote files can be downloaded", cx);
+            return;
+        }
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_file_download(
+                        &workspace_root,
+                        &workspace_config,
+                        &config_path,
+                        &file,
+                    )
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("download failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_trash(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before loading local trash", cx);
+            return;
+        };
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let (result, entries) = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_trash_list(&workspace_root, &workspace_config)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    (
+                        CommandResult {
+                            ok: false,
+                            summary: format!("load trash failed: {error}"),
+                            output: String::new(),
+                        },
+                        Vec::new(),
+                    )
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if result.ok {
+                            this.trash_entries = entries;
+                        }
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn restore_trash_entry(&mut self, entry: TrashEntry, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before restoring trash", cx);
+            return;
+        };
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let (result, entries) = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_trash_restore(&workspace_root, &workspace_config, &entry)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    (
+                        CommandResult {
+                            ok: false,
+                            summary: format!("restore trash failed: {error}"),
+                            output: String::new(),
+                        },
+                        None,
+                    )
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Some(entries) = entries {
+                            this.trash_entries = entries;
+                        }
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_conflicts(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(&config.server_url)?;
+                    let data = client
+                        .list_conflicts(&config.tokens.access_token, 100)
+                        .await?;
+                    Ok::<(CliConfig, Vec<SyncConflict>), anyhow::Error>((config, data.items))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, conflicts)) => {
+                                this.cli_config = Some(config);
+                                this.conflicts = conflicts;
+                                this.message =
+                                    format!("loaded {} pending conflicts", this.conflicts.len());
+                            }
+                            Err(error) => this.message = format!("load conflicts failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = self
+            .current_workspace()
+            .map(|workspace| workspace.server_url(&config.server_url))
+            .unwrap_or_else(|| config.server_url.clone());
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let data = client
+                        .list_devices(&config.tokens.access_token, 100)
+                        .await?;
+                    Ok::<(CliConfig, Vec<Device>), anyhow::Error>((config, data.items))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, devices)) => {
+                                this.cli_config = Some(config);
+                                this.devices = devices;
+                                this.message = format!("loaded {} devices", this.devices.len());
+                            }
+                            Err(error) => this.message = format!("load devices failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn resolve_conflict(
+        &mut self,
+        conflict_id: String,
+        resolution: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before resolving conflicts", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(&config.server_url)?;
+                    let resolved = client
+                        .resolve_conflict(&config.tokens.access_token, &conflict_id, resolution)
+                        .await?;
+                    let conflicts = client
+                        .list_conflicts(&config.tokens.access_token, 100)
+                        .await?;
+                    Ok::<(CliConfig, SyncConflict, Vec<SyncConflict>), anyhow::Error>((
+                        config,
+                        resolved,
+                        conflicts.items,
+                    ))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, resolved, conflicts)) => {
+                                this.cli_config = Some(config);
+                                this.conflicts = conflicts;
+                                this.message = format!(
+                                    "resolved {} as {}",
+                                    resolved.path,
+                                    conflict_resolution_label(resolution)
+                                );
+                            }
+                            Err(error) => {
+                                this.message = format!("resolve conflict failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn run_sync_command(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        let workspace_root = self
+            .current_workspace()
+            .map(|workspace| workspace.root_path())
+            .unwrap_or_else(|| PathBuf::from(self.workspace_input.read(cx).value().as_ref()));
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_sync(action, &workspace_root, &config_path)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("sync command failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn run_daemon_command(&mut self, action: &str, cx: &mut Context<Self>) {
+        let workspace_root = self
+            .current_workspace()
+            .map(|workspace| workspace.root_path())
+            .unwrap_or_else(|| PathBuf::from(self.workspace_input.read(cx).value().as_ref()));
+        let config_path = self.cli_config_path.clone();
+        let action = action.to_string();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_daemon(&action, &workspace_root, &config_path)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("daemon command failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn init_workspace(&mut self, cx: &mut Context<Self>) {
+        let roots = parse_workspace_paths(self.workspace_input.read(cx).value().as_ref());
+        if roots.is_empty() {
+            self.set_message("workspace path is required", cx);
+            return;
+        }
+        let remote_root = self.remote_root_input.read(cx).value().to_string();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_workspace_init(&roots, &remote_root, &config_path)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("workspace init failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                            this.workspaces = workspaces;
+                            this.selected_workspace = this.workspaces.len().saturating_sub(1);
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn save_server(&mut self, cx: &mut Context<Self>) {
+        self.settings.server_url = self.current_server(cx);
+        match save_settings(&self.settings) {
+            Ok(()) => self.set_message("server saved", cx),
+            Err(error) => self.set_message(format!("save settings failed: {error}"), cx),
+        }
+    }
+}
