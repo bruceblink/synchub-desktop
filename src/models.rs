@@ -146,6 +146,22 @@ pub struct SyncConflictListData {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct DeviceListData {
+    pub items: Vec<Device>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    pub platform: String,
+    pub last_seen_at: Option<String>,
+    pub last_applied_change_id: i64,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SyncConflict {
     pub id: String,
     pub file_id: Option<String>,
@@ -272,6 +288,11 @@ pub fn conflict_resolution_label(resolution: &str) -> &'static str {
         "keep_both" => "keep both",
         _ => "unknown",
     }
+}
+
+pub fn is_current_device(device: &Device, snapshot: &WorkspaceSnapshot) -> bool {
+    let current = snapshot.device_id();
+    !current.trim().is_empty() && device.id == current
 }
 
 pub fn is_success_code(code: &serde_json::Value) -> bool {

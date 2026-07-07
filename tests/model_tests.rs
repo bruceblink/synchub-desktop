@@ -1,7 +1,7 @@
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::models::{
-    Manifest, ManifestEntry, WorkspaceRegistryEntry, WorkspaceSnapshot, conflict_resolution_label,
-    format_bytes, is_success_code, workspace_metrics,
+    Device, Manifest, ManifestEntry, WorkspaceConfig, WorkspaceRegistryEntry, WorkspaceSnapshot,
+    conflict_resolution_label, format_bytes, is_current_device, is_success_code, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     parse_workspace_paths, sync_command_args, workspace_init_command_args,
@@ -145,4 +145,31 @@ fn workspace_init_args_support_multiple_paths() {
 #[test]
 fn workspace_init_args_reject_empty_paths() {
     assert!(workspace_init_command_args(&[], "", "C:/cfg/config.json").is_none());
+}
+
+#[test]
+fn current_device_matches_workspace_device_id() {
+    let device = Device {
+        id: "dev_1".to_string(),
+        ..Device::default()
+    };
+    let snapshot = WorkspaceSnapshot {
+        config: Some(WorkspaceConfig {
+            device_id: Some("dev_1".to_string()),
+            ..WorkspaceConfig::default()
+        }),
+        ..WorkspaceSnapshot::default()
+    };
+
+    assert!(is_current_device(&device, &snapshot));
+}
+
+#[test]
+fn blank_workspace_device_id_does_not_match_device() {
+    let device = Device {
+        id: "dev_1".to_string(),
+        ..Device::default()
+    };
+
+    assert!(!is_current_device(&device, &WorkspaceSnapshot::default()));
 }

@@ -4,8 +4,8 @@ use crate::config::{
     load_settings, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
 };
 use crate::models::{
-    CliConfig, FileNode, SyncConflict, WorkspaceSnapshot, conflict_resolution_label, format_bytes,
-    workspace_metrics,
+    CliConfig, Device, FileNode, SyncConflict, WorkspaceSnapshot, conflict_resolution_label,
+    format_bytes, is_current_device, workspace_metrics,
 };
 use crate::sync_commands::{
     parse_workspace_paths, sync_action_label, sync_command_args, workspace_init_command_args,
@@ -30,6 +30,7 @@ enum MainView {
     Overview,
     Sync,
     Files,
+    Devices,
     Conflicts,
     Daemon,
 }
@@ -61,6 +62,7 @@ pub struct SyncHubDesktop {
     selected_workspace: usize,
     api_status: Option<String>,
     files: Vec<FileNode>,
+    devices: Vec<Device>,
     conflicts: Vec<SyncConflict>,
     active_view: MainView,
     auth_mode: AuthMode,
@@ -104,6 +106,7 @@ impl SyncHubDesktop {
             selected_workspace: 0,
             api_status: None,
             files: Vec::new(),
+            devices: Vec::new(),
             conflicts: Vec::new(),
             active_view: MainView::Overview,
             auth_mode: AuthMode::Login,
@@ -171,6 +174,7 @@ impl SyncHubDesktop {
         self.reload_local_state(window, cx);
         self.refresh_api(cx);
         self.refresh_files(cx);
+        self.refresh_devices(cx);
         self.refresh_conflicts(cx);
     }
 
@@ -283,6 +287,7 @@ impl SyncHubDesktop {
                             Ok(()) => {
                                 this.cli_config = None;
                                 this.files.clear();
+                                this.devices.clear();
                                 this.conflicts.clear();
                                 this.message = "signed out".to_string();
                             }
@@ -366,6 +371,50 @@ impl SyncHubDesktop {
                                     format!("loaded {} pending conflicts", this.conflicts.len());
                             }
                             Err(error) => this.message = format!("load conflicts failed: {error}"),
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_devices(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = self
+            .current_workspace()
+            .map(|workspace| workspace.server_url(&config.server_url))
+            .unwrap_or_else(|| config.server_url.clone());
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let data = client
+                        .list_devices(&config.tokens.access_token, 100)
+                        .await?;
+                    Ok::<(CliConfig, Vec<Device>), anyhow::Error>((config, data.items))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, devices)) => {
+                                this.cli_config = Some(config);
+                                this.devices = devices;
+                                this.message = format!("loaded {} devices", this.devices.len());
+                            }
+                            Err(error) => this.message = format!("load devices failed: {error}"),
                         }
                         cx.notify();
                     });
@@ -794,6 +843,13 @@ impl SyncHubDesktop {
             .child(self.render_nav_button("files", MainView::Files, IconName::File, "Files", cx))
             .child(self.render_nav_button("sync", MainView::Sync, IconName::Redo2, "Sync", cx))
             .child(self.render_nav_button(
+                "devices",
+                MainView::Devices,
+                IconName::HardDrive,
+                "Devices",
+                cx,
+            ))
+            .child(self.render_nav_button(
                 "conflicts",
                 MainView::Conflicts,
                 IconName::TriangleAlert,
@@ -814,6 +870,7 @@ impl SyncHubDesktop {
             MainView::Overview => self.render_overview(cx).into_any_element(),
             MainView::Sync => self.render_sync(cx).into_any_element(),
             MainView::Files => self.render_files(cx).into_any_element(),
+            MainView::Devices => self.render_devices(cx).into_any_element(),
             MainView::Conflicts => self.render_conflicts(cx).into_any_element(),
             MainView::Daemon => self.render_daemon(cx).into_any_element(),
         }
@@ -993,6 +1050,45 @@ impl SyncHubDesktop {
                     .border_color(colors.border)
                     .rounded_md()
                     .children(self.files.iter().map(|file| self.render_file_row(file))),
+            )
+    }
+
+    fn render_devices(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let device_rows = self
+            .devices
+            .iter()
+            .map(|device| self.render_device_row(device).into_any_element())
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .p_3()
+                    .justify_between()
+                    .items_center()
+                    .child(Label::new("Devices").text_color(colors.text))
+                    .child(
+                        Button::new("load-devices")
+                            .icon(IconName::Redo2)
+                            .label("Load")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_devices(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .mx_3()
+                    .mb_3()
+                    .overflow_y_scrollbar()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .children(device_rows),
             )
     }
 
@@ -1246,6 +1342,52 @@ impl SyncHubDesktop {
             )
             .child(Label::new(format_bytes(file.size)).text_color(colors.muted))
             .child(self.render_status_badge(format!("v{}", file.version).as_str()))
+    }
+
+    fn render_device_row(&self, device: &Device) -> impl IntoElement {
+        let colors = self.colors;
+        let current = self
+            .current_workspace()
+            .map(|workspace| is_current_device(device, workspace))
+            .unwrap_or(false);
+        h_flex()
+            .gap_3()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                Icon::new(IconName::HardDrive)
+                    .small()
+                    .text_color(if current {
+                        colors.success
+                    } else {
+                        colors.accent
+                    }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .child(Label::new(device_name(device)).text_color(colors.text))
+                    .child(
+                        Label::new(device.id.as_str())
+                            .text_color(colors.muted)
+                            .text_size(rems(0.72)),
+                    ),
+            )
+            .child(Label::new(device.platform.as_str()).text_color(colors.muted))
+            .child(
+                Label::new(format!("cursor {}", device.last_applied_change_id))
+                    .text_color(colors.muted),
+            )
+            .child(
+                Label::new(format_optional(device.last_seen_at.as_deref()))
+                    .text_color(colors.muted),
+            )
+            .when(current, |this| {
+                this.child(self.render_status_badge("current"))
+            })
     }
 
     fn render_conflict_row(
@@ -1572,6 +1714,21 @@ fn run_command(program: &str, args: &[&str]) -> CommandResult {
             output: String::new(),
         },
     }
+}
+
+fn device_name(device: &Device) -> &str {
+    if device.name.trim().is_empty() {
+        "unnamed device"
+    } else {
+        device.name.as_str()
+    }
+}
+
+fn format_optional(value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn optional_i64(value: Option<i64>) -> String {
