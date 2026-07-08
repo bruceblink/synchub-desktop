@@ -72,8 +72,42 @@ impl SyncHubClient {
         .await
     }
 
+    pub async fn get_file_by_path(&self, access_token: &str, path: &str) -> Result<FileNode> {
+        let path = file_by_path_endpoint(path);
+        self.request_json(Method::GET, &path, Some(access_token), None)
+            .await
+    }
+
     pub async fn list_files(&self, access_token: &str, page_size: u32) -> Result<FileListData> {
-        let path = format!("/api/v1/files?page_size={}", page_size);
+        self.list_files_page(access_token, None, page_size).await
+    }
+
+    pub async fn list_files_for_path(
+        &self,
+        access_token: &str,
+        remote_path: &str,
+        page_size: u32,
+    ) -> Result<FileListData> {
+        let remote_path = remote_path.trim();
+        if remote_path.is_empty() || remote_path == "/" {
+            return self.list_files(access_token, page_size).await;
+        }
+
+        let parent = self.get_file_by_path(access_token, remote_path).await?;
+        if parent.node_type != "directory" {
+            return Err(anyhow!("remote workspace path is not a directory"));
+        }
+        self.list_files_page(access_token, Some(parent.id.as_str()), page_size)
+            .await
+    }
+
+    async fn list_files_page(
+        &self,
+        access_token: &str,
+        parent_id: Option<&str>,
+        page_size: u32,
+    ) -> Result<FileListData> {
+        let path = files_endpoint(parent_id, page_size);
         self.request_json(Method::GET, &path, Some(access_token), None)
             .await
     }
@@ -319,6 +353,25 @@ fn endpoint(base_url: &str, path: &str) -> String {
     )
 }
 
+fn file_by_path_endpoint(path: &str) -> String {
+    format!("/api/v1/files/by-path?path={}", url_escape(path.trim()))
+}
+
+fn files_endpoint(parent_id: Option<&str>, page_size: u32) -> String {
+    let mut query = Vec::new();
+    if let Some(parent_id) = parent_id.filter(|value| !value.trim().is_empty()) {
+        query.push(format!("parent_id={}", url_escape(parent_id.trim())));
+    }
+    if page_size > 0 {
+        query.push(format!("page_size={page_size}"));
+    }
+    if query.is_empty() {
+        "/api/v1/files".to_string()
+    } else {
+        format!("/api/v1/files?{}", query.join("&"))
+    }
+}
+
 fn url_escape(value: &str) -> String {
     value
         .bytes()
@@ -414,5 +467,22 @@ mod tests {
     fn url_escape_encodes_path_segments() {
         assert_eq!(url_escape("file 1/版本"), "file%201%2F%E7%89%88%E6%9C%AC");
         assert_eq!(url_escape("abc-_.~"), "abc-_.~");
+    }
+
+    #[test]
+    fn file_by_path_endpoint_escapes_remote_path_query() {
+        assert_eq!(
+            file_by_path_endpoint("/workspace/docs/readme.md"),
+            "/api/v1/files/by-path?path=%2Fworkspace%2Fdocs%2Freadme.md"
+        );
+    }
+
+    #[test]
+    fn files_endpoint_scopes_list_to_parent_directory() {
+        assert_eq!(files_endpoint(None, 100), "/api/v1/files?page_size=100");
+        assert_eq!(
+            files_endpoint(Some("dir 1"), 25),
+            "/api/v1/files?parent_id=dir%201&page_size=25"
+        );
     }
 }

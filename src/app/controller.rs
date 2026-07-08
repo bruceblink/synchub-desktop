@@ -189,6 +189,7 @@ impl SyncHubDesktop {
         let Some(mut config) = self.cli_config.clone() else {
             return;
         };
+        let workspace = self.current_workspace().cloned();
         let config_path = self.cli_config_path.clone();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -199,8 +200,18 @@ impl SyncHubDesktop {
                     if changed {
                         save_cli_config(&config_path, &config)?;
                     }
-                    let client = SyncHubClient::new(&config.server_url)?;
-                    let data = client.list_files(&config.tokens.access_token, 100).await?;
+                    let server = workspace
+                        .as_ref()
+                        .map(|workspace| workspace.server_url(&config.server_url))
+                        .unwrap_or_else(|| config.server_url.clone());
+                    let remote_path = workspace
+                        .as_ref()
+                        .map(|workspace| workspace.remote_path())
+                        .unwrap_or_else(|| "/".to_string());
+                    let client = SyncHubClient::new(server)?;
+                    let data = client
+                        .list_files_for_path(&config.tokens.access_token, &remote_path, 100)
+                        .await?;
                     Ok::<(CliConfig, Vec<FileNode>), anyhow::Error>((config, data.items))
                 }
                 .await;
@@ -268,7 +279,13 @@ impl SyncHubDesktop {
                             Some(device_id.as_str()),
                         )
                         .await?;
-                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    let files = client
+                        .list_files_for_path(
+                            &config.tokens.access_token,
+                            &workspace.remote_path(),
+                            100,
+                        )
+                        .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
                         config,
                         node,
@@ -408,7 +425,13 @@ impl SyncHubDesktop {
                         let versions = client
                             .list_file_versions(&config.tokens.access_token, &file.id, 100)
                             .await?;
-                        let files = client.list_files(&config.tokens.access_token, 100).await?;
+                        let files = client
+                            .list_files_for_path(
+                                &config.tokens.access_token,
+                                &workspace.remote_path(),
+                                100,
+                            )
+                            .await?;
                         Ok::<(CliConfig, FileNode, Vec<FileVersion>, Vec<FileNode>), anyhow::Error>(
                             (config, restored.file, versions.items, files.items),
                         )
@@ -551,7 +574,13 @@ impl SyncHubDesktop {
                             Some(device_id.as_str()),
                         )
                         .await?;
-                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    let files = client
+                        .list_files_for_path(
+                            &config.tokens.access_token,
+                            &workspace.remote_path(),
+                            100,
+                        )
+                        .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
                         config,
                         file,
@@ -625,7 +654,13 @@ impl SyncHubDesktop {
                             Some(device_id.as_str()),
                         )
                         .await?;
-                    let files = client.list_files(&config.tokens.access_token, 100).await?;
+                    let files = client
+                        .list_files_for_path(
+                            &config.tokens.access_token,
+                            &workspace.remote_path(),
+                            100,
+                        )
+                        .await?;
                     Ok::<(CliConfig, FileNode, FileNode, Vec<FileNode>), anyhow::Error>((
                         config,
                         file,
