@@ -487,6 +487,15 @@ impl SyncHubDesktop {
                             .label("Load")
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_files(cx))),
+                    )
+                    .child(
+                        Button::new("load-more-files")
+                            .icon(IconName::ChevronDown)
+                            .label("More")
+                            .small()
+                            .ghost()
+                            .disabled(self.loading || self.files_next_cursor.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.load_more_files(cx))),
                     ),
             )
             .child(

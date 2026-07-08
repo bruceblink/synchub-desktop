@@ -9,7 +9,7 @@ use crate::config::{
     load_cli_config, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
 };
 use crate::models::{
-    CliConfig, Device, FileNode, FileVersion, SyncConflict, TrashEntry,
+    CliConfig, Device, FileListData, FileNode, FileVersion, SyncConflict, TrashEntry,
     compose_remote_directory_path, conflict_resolution_label, file_version_label,
 };
 use crate::sync_commands::parse_workspace_paths;
@@ -168,6 +168,7 @@ impl SyncHubDesktop {
                             Ok(()) => {
                                 this.cli_config = None;
                                 this.files.clear();
+                                this.files_next_cursor = None;
                                 this.selected_file = None;
                                 this.file_versions.clear();
                                 this.trash_entries.clear();
@@ -186,6 +187,18 @@ impl SyncHubDesktop {
     }
 
     pub(super) fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        self.load_files_page(None, false, cx);
+    }
+
+    pub(super) fn load_more_files(&mut self, cx: &mut Context<Self>) {
+        let Some(cursor) = self.files_next_cursor.clone() else {
+            self.set_message("no more remote files to load", cx);
+            return;
+        };
+        self.load_files_page(Some(cursor), true, cx);
+    }
+
+    fn load_files_page(&mut self, cursor: Option<String>, append: bool, cx: &mut Context<Self>) {
         let Some(mut config) = self.cli_config.clone() else {
             return;
         };
@@ -210,18 +223,28 @@ impl SyncHubDesktop {
                         .unwrap_or_else(|| "/".to_string());
                     let client = SyncHubClient::new(server)?;
                     let data = client
-                        .list_files_for_path(&config.tokens.access_token, &remote_path, 100)
+                        .list_files_for_path(
+                            &config.tokens.access_token,
+                            &remote_path,
+                            100,
+                            cursor.as_deref(),
+                        )
                         .await?;
-                    Ok::<(CliConfig, Vec<FileNode>), anyhow::Error>((config, data.items))
+                    Ok::<(CliConfig, FileListData), anyhow::Error>((config, data))
                 }
                 .await;
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
                         match result {
-                            Ok((config, files)) => {
+                            Ok((config, data)) => {
                                 this.cli_config = Some(config);
-                                this.files = files;
+                                if append {
+                                    this.files.extend(data.items);
+                                } else {
+                                    this.files = data.items;
+                                }
+                                this.files_next_cursor = data.next_cursor;
                                 this.selected_file = this
                                     .selected_file
                                     .as_ref()
@@ -232,7 +255,13 @@ impl SyncHubDesktop {
                                 if this.selected_file.is_none() {
                                     this.file_versions.clear();
                                 }
-                                this.message = format!("loaded {} remote files", this.files.len());
+                                let suffix = if this.files_next_cursor.is_some() {
+                                    " (more available)"
+                                } else {
+                                    ""
+                                };
+                                this.message =
+                                    format!("loaded {} remote files{suffix}", this.files.len());
                             }
                             Err(error) => this.message = format!("load files failed: {error}"),
                         }
@@ -284,6 +313,7 @@ impl SyncHubDesktop {
                             &config.tokens.access_token,
                             &workspace.remote_path(),
                             100,
+                            None,
                         )
                         .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
@@ -300,6 +330,7 @@ impl SyncHubDesktop {
                             Ok((config, node, files)) => {
                                 this.cli_config = Some(config);
                                 this.files = files;
+                                this.files_next_cursor = None;
                                 this.message = format!("created remote folder {}", node.path);
                             }
                             Err(error) => {
@@ -430,6 +461,7 @@ impl SyncHubDesktop {
                                 &config.tokens.access_token,
                                 &workspace.remote_path(),
                                 100,
+                                None,
                             )
                             .await?;
                         Ok::<(CliConfig, FileNode, Vec<FileVersion>, Vec<FileNode>), anyhow::Error>(
@@ -446,6 +478,7 @@ impl SyncHubDesktop {
                                 this.selected_file = Some(restored.clone());
                                 this.file_versions = versions;
                                 this.files = files;
+                                this.files_next_cursor = None;
                                 this.message = format!(
                                     "restored {} to {}",
                                     restored.path,
@@ -579,6 +612,7 @@ impl SyncHubDesktop {
                             &config.tokens.access_token,
                             &workspace.remote_path(),
                             100,
+                            None,
                         )
                         .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
@@ -595,6 +629,7 @@ impl SyncHubDesktop {
                             Ok((config, file, files)) => {
                                 this.cli_config = Some(config);
                                 this.files = files;
+                                this.files_next_cursor = None;
                                 if this
                                     .selected_file
                                     .as_ref()
@@ -659,6 +694,7 @@ impl SyncHubDesktop {
                             &config.tokens.access_token,
                             &workspace.remote_path(),
                             100,
+                            None,
                         )
                         .await?;
                     Ok::<(CliConfig, FileNode, FileNode, Vec<FileNode>), anyhow::Error>((
@@ -676,6 +712,7 @@ impl SyncHubDesktop {
                             Ok((config, old, moved, files)) => {
                                 this.cli_config = Some(config);
                                 this.files = files;
+                                this.files_next_cursor = None;
                                 if this
                                     .selected_file
                                     .as_ref()
