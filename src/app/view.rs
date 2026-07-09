@@ -929,6 +929,20 @@ impl SyncHubDesktop {
                     ),
             )
             .child(
+                h_flex().gap_2().child(
+                    Button::new("daemon-reset-state")
+                        .icon(IconName::Undo2)
+                        .label("Reset State")
+                        .ghost()
+                        .disabled(self.loading || self.current_workspace().is_none())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.run_daemon_command("reset-state", cx)
+                            }),
+                        ),
+                ),
+            )
+            .child(
                 v_flex()
                     .gap_2()
                     .p_4()

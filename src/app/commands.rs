@@ -1,9 +1,9 @@
 use super::CommandResult;
 use crate::models::{FileNode, SyncTrashSnapshot, TrashEntry};
 use crate::sync_commands::{
-    file_download_command_args, manifest_scan_command_args, sync_action_label, sync_command_args,
-    trash_list_command_args, trash_restore_command_args, workspace_init_command_args,
-    workspace_prune_command_args, workspace_remove_command_args,
+    daemon_command_args, file_download_command_args, manifest_scan_command_args, sync_action_label,
+    sync_command_args, trash_list_command_args, trash_restore_command_args,
+    workspace_init_command_args, workspace_prune_command_args, workspace_remove_command_args,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -119,18 +119,23 @@ pub(super) fn run_synchub_cli_daemon(
     workspace_root: &PathBuf,
     config_path: &PathBuf,
 ) -> CommandResult {
-    let mut args = vec!["sync", "daemon"];
-    match action {
-        "status" => args.push("--status"),
-        "pause" => args.push("--pause"),
-        "resume" => args.push("--resume"),
-        "start" => {}
-        _ => {}
-    }
     let root = workspace_root.display().to_string();
     let config = config_path.display().to_string();
-    args.extend(["--path", &root, "--config", &config]);
-    run_command("synchub-cli", &args)
+    let Some(args) = daemon_command_args(action, &root, &config) else {
+        return CommandResult {
+            ok: false,
+            summary: format!("unknown daemon action: {action}"),
+            output: String::new(),
+        };
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    result.summary = if result.ok {
+        format!("{} completed", daemon_action_label(action))
+    } else {
+        format!("{} failed: {}", daemon_action_label(action), result.summary)
+    };
+    result
 }
 
 pub(super) fn run_synchub_cli_workspace_init(
@@ -265,5 +270,16 @@ fn run_command(program: &str, args: &[&str]) -> CommandResult {
             summary: format!("failed to start {program}: {error}"),
             output: String::new(),
         },
+    }
+}
+
+fn daemon_action_label(action: &str) -> &'static str {
+    match action {
+        "start" => "Daemon start",
+        "status" => "Daemon status",
+        "pause" => "Daemon pause",
+        "resume" => "Daemon resume",
+        "reset-state" => "Daemon reset",
+        _ => "Daemon command",
     }
 }

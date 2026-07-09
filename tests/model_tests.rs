@@ -6,8 +6,8 @@ use synchub_desktop::models::{
     is_file_version_pinned, is_success_code, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
-    file_download_command_args, manifest_scan_command_args, parse_workspace_paths,
-    sync_command_args, trash_list_command_args, trash_restore_command_args,
+    daemon_command_args, file_download_command_args, manifest_scan_command_args,
+    parse_workspace_paths, sync_command_args, trash_list_command_args, trash_restore_command_args,
     workspace_init_command_args, workspace_prune_command_args, workspace_remove_command_args,
 };
 
@@ -343,6 +343,28 @@ fn trash_restore_args_include_batch_and_entry() {
             "docs/readme.md",
         ]
     );
+}
+
+#[test]
+fn daemon_reset_state_args_target_selected_workspace() {
+    assert_eq!(
+        daemon_command_args("reset-state", "C:/work", "C:/cfg/config.json")
+            .expect("daemon reset args"),
+        vec![
+            "sync",
+            "daemon",
+            "--reset-state",
+            "--path",
+            "C:/work",
+            "--config",
+            "C:/cfg/config.json",
+        ]
+    );
+}
+
+#[test]
+fn daemon_args_reject_unknown_action() {
+    assert!(daemon_command_args("restart", "C:/work", "C:/cfg/config.json").is_none());
 }
 
 #[test]
