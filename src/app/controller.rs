@@ -54,7 +54,7 @@ impl SyncHubDesktop {
 
     pub(super) fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reload_local_state(window, cx);
-        self.refresh_api(cx);
+        self.refresh_server_status(cx);
         self.refresh_files(cx);
         self.refresh_trash(cx);
         self.refresh_devices(cx);
@@ -62,6 +62,10 @@ impl SyncHubDesktop {
     }
 
     pub(super) fn refresh_api(&mut self, cx: &mut Context<Self>) {
+        self.refresh_server_status(cx);
+    }
+
+    pub(super) fn refresh_server_status(&mut self, cx: &mut Context<Self>) {
         let server = self.current_server(cx);
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -69,23 +73,32 @@ impl SyncHubDesktop {
             async move {
                 let result = async {
                     let client = SyncHubClient::new(server)?;
-                    client.ready().await
+                    let version = client.version().await?;
+                    let health = client.health().await?;
+                    let ready = client.ready().await?;
+                    Ok::<_, anyhow::Error>((version, health, ready))
                 }
                 .await;
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
                         match result {
-                            Ok(status) => {
-                                this.api_status = Some(if status.status.is_empty() {
+                            Ok((version, health, ready)) => {
+                                this.api_status = Some(if ready.status.is_empty() {
                                     "ready".to_string()
                                 } else {
-                                    status.status
+                                    ready.status.clone()
                                 });
-                                this.message = "API is ready".to_string();
+                                this.server_version = Some(version);
+                                this.server_health = Some(health);
+                                this.server_ready = Some(ready);
+                                this.message = "server status loaded".to_string();
                             }
                             Err(error) => {
                                 this.api_status = Some("unreachable".to_string());
+                                this.server_version = None;
+                                this.server_health = None;
+                                this.server_ready = None;
                                 this.message = format!("API check failed: {error}");
                             }
                         }

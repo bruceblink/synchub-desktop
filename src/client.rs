@@ -1,7 +1,7 @@
 use crate::models::{
     ApiEnvelope, ApiStatus, CliConfig, DeviceListData, FileListData, FileNode, FileVersion,
     FileVersionListData, LoginData, RestoreFileVersionData, SyncConflict, SyncConflictListData,
-    TokenPair, is_success_code,
+    TokenPair, VersionInfo, is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -26,6 +26,14 @@ impl SyncHubClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub async fn version(&self) -> Result<VersionInfo> {
+        self.request_json(Method::GET, "/version", None, None).await
+    }
+
+    pub async fn health(&self) -> Result<ApiStatus> {
+        self.request_json(Method::GET, "/healthz", None, None).await
     }
 
     pub async fn ready(&self) -> Result<ApiStatus> {

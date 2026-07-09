@@ -8,7 +8,8 @@ use crate::config::{
     DesktopSettings, default_cli_config_path, default_workspace_registry_path, load_settings,
 };
 use crate::models::{
-    CliConfig, Device, FileNode, FileVersion, SyncConflict, TrashEntry, WorkspaceSnapshot,
+    ApiStatus, CliConfig, Device, FileNode, FileVersion, SyncConflict, TrashEntry, VersionInfo,
+    WorkspaceSnapshot,
 };
 use crate::theme::ThemeColors;
 use gpui::*;
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainView {
     Overview,
+    Server,
     Sync,
     Files,
     Versions,
@@ -55,6 +57,9 @@ pub struct SyncHubDesktop {
     workspaces: Vec<WorkspaceSnapshot>,
     selected_workspace: usize,
     api_status: Option<String>,
+    server_version: Option<VersionInfo>,
+    server_health: Option<ApiStatus>,
+    server_ready: Option<ApiStatus>,
     files: Vec<FileNode>,
     files_next_cursor: Option<String>,
     selected_file: Option<FileNode>,
@@ -109,6 +114,9 @@ impl SyncHubDesktop {
             workspaces: Vec::new(),
             selected_workspace: 0,
             api_status: None,
+            server_version: None,
+            server_health: None,
+            server_ready: None,
             files: Vec::new(),
             files_next_cursor: None,
             selected_file: None,

@@ -8,6 +8,12 @@ pub struct ApiStatus {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct VersionInfo {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct User {
     pub id: String,
     pub email: String,

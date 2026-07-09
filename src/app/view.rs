@@ -280,6 +280,13 @@ impl SyncHubDesktop {
                 "Overview",
                 cx,
             ))
+            .child(self.render_nav_button(
+                "server",
+                MainView::Server,
+                IconName::Globe,
+                "Server",
+                cx,
+            ))
             .child(self.render_nav_button("files", MainView::Files, IconName::File, "Files", cx))
             .child(self.render_nav_button(
                 "versions",
@@ -316,6 +323,7 @@ impl SyncHubDesktop {
     fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.active_view {
             MainView::Overview => self.render_overview(cx).into_any_element(),
+            MainView::Server => self.render_server(cx).into_any_element(),
             MainView::Sync => self.render_sync(cx).into_any_element(),
             MainView::Files => self.render_files(cx).into_any_element(),
             MainView::Versions => self.render_versions(cx).into_any_element(),
@@ -425,6 +433,85 @@ impl SyncHubDesktop {
                                 .text_size(rems(0.78)),
                         )
                     }),
+            )
+    }
+
+    fn render_server(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let version = self
+            .server_version
+            .as_ref()
+            .map(|version| format!("{} {}", version.name, version.version))
+            .unwrap_or_else(|| "-".to_string());
+        let health = self
+            .server_health
+            .as_ref()
+            .map(|status| status.status.clone())
+            .filter(|status| !status.is_empty())
+            .unwrap_or_else(|| "unchecked".to_string());
+        let ready = self
+            .server_ready
+            .as_ref()
+            .map(|status| status.status.clone())
+            .filter(|status| !status.is_empty())
+            .unwrap_or_else(|| "unchecked".to_string());
+
+        v_flex()
+            .size_full()
+            .gap_3()
+            .p_4()
+            .bg(colors.bg)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(Label::new("Server").text_color(colors.text))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("refresh-server-status")
+                            .icon(IconName::Redo2)
+                            .label("Refresh")
+                            .small()
+                            .disabled(self.loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_server_status(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .child(self.render_detail_row("URL", self.current_server(cx)))
+                    .child(self.render_detail_row("Version", version))
+                    .child(self.render_detail_row("Health", health.clone()))
+                    .child(self.render_detail_row("Ready", ready.clone()))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(self.render_status_badge(health.as_str()))
+                            .child(self.render_status_badge(ready.as_str())),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .bg(colors.panel)
+                    .border_1()
+                    .border_color(colors.border)
+                    .rounded_md()
+                    .child(Label::new("Last check").text_color(colors.text))
+                    .child(
+                        Label::new(if self.message.is_empty() {
+                            "Ready"
+                        } else {
+                            &self.message
+                        })
+                        .text_color(colors.muted),
+                    ),
             )
     }
 
