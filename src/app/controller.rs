@@ -1,7 +1,8 @@
 use super::commands::{
-    run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_sync,
-    run_synchub_cli_trash_list, run_synchub_cli_trash_restore, run_synchub_cli_workspace_init,
-    run_synchub_cli_workspace_prune, run_synchub_cli_workspace_remove,
+    run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_manifest_scan,
+    run_synchub_cli_sync, run_synchub_cli_trash_list, run_synchub_cli_trash_restore,
+    run_synchub_cli_workspace_init, run_synchub_cli_workspace_prune,
+    run_synchub_cli_workspace_remove,
 };
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
@@ -1206,6 +1207,42 @@ impl SyncHubDesktop {
                 self.trash_entries.clear();
             }
         }
+    }
+
+    pub(super) fn scan_selected_manifest(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before scanning manifest", cx);
+            return;
+        };
+        let workspace_root = workspace.root_path();
+        let workspace_config = workspace.workspace_config_path();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_manifest_scan(&workspace_root, &workspace_config)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("manifest scan failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if result.ok {
+                            this.reload_workspace_list_after_registry_change();
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     pub(super) fn save_server(&mut self, cx: &mut Context<Self>) {

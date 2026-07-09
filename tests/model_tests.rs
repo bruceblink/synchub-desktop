@@ -6,9 +6,9 @@ use synchub_desktop::models::{
     workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
-    file_download_command_args, parse_workspace_paths, sync_command_args, trash_list_command_args,
-    trash_restore_command_args, workspace_init_command_args, workspace_prune_command_args,
-    workspace_remove_command_args,
+    file_download_command_args, manifest_scan_command_args, parse_workspace_paths,
+    sync_command_args, trash_list_command_args, trash_restore_command_args,
+    workspace_init_command_args, workspace_prune_command_args, workspace_remove_command_args,
 };
 
 #[test]
@@ -220,6 +220,28 @@ fn workspace_prune_args_use_json_output() {
             "--json",
         ]
     );
+}
+
+#[test]
+fn manifest_scan_args_write_json_result() {
+    assert_eq!(
+        manifest_scan_command_args("C:/work", "C:/work/.synchub/workspace.json")
+            .expect("manifest scan args"),
+        vec![
+            "manifest",
+            "scan",
+            "--path",
+            "C:/work",
+            "--workspace-config",
+            "C:/work/.synchub/workspace.json",
+            "--json",
+        ]
+    );
+}
+
+#[test]
+fn manifest_scan_args_reject_empty_path() {
+    assert!(manifest_scan_command_args("", "C:/work/.synchub/workspace.json").is_none());
 }
 
 #[test]

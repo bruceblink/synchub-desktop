@@ -10,6 +10,7 @@ SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust proje
 - Initialize one or more workspace folders from the sidebar, optionally under a shared remote root.
 - Remove selected workspace registrations and prune stale registry entries.
 - Show workspace manifest, pending local changes, trash, daemon state, and pending remote conflicts.
+- Scan the selected workspace manifest from the desktop app.
 - List remote files for the selected workspace.
 - Create remote folders in the selected workspace.
 - Move or rename remote files and folders from the selected workspace.

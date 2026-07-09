@@ -326,7 +326,7 @@ impl SyncHubDesktop {
         }
     }
 
-    fn render_overview(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         let metrics = self
             .current_workspace()
@@ -374,9 +374,26 @@ impl SyncHubDesktop {
                     .border_color(colors.border)
                     .rounded_md()
                     .child(
-                        Label::new("Workspace")
-                            .text_color(colors.text)
-                            .text_size(rems(1.0)),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Label::new("Workspace")
+                                    .text_color(colors.text)
+                                    .text_size(rems(1.0)),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("scan-manifest")
+                                    .icon(IconName::Search)
+                                    .label("Scan Manifest")
+                                    .small()
+                                    .ghost()
+                                    .disabled(self.loading || self.current_workspace().is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.scan_selected_manifest(cx)
+                                    })),
+                            ),
                     )
                     .child(self.render_workspace_detail()),
             )
