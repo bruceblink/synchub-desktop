@@ -3,7 +3,7 @@ use synchub_desktop::models::{
     ApiEnvelope, ApiStatus, Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig,
     WorkspaceRegistryEntry, WorkspaceSnapshot, compose_remote_directory_path,
     conflict_resolution_label, file_version_label, format_bytes, is_current_device,
-    is_file_version_pinned, is_success_code, workspace_metrics,
+    is_file_version_pinned, is_success_code, pending_manifest_changes, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     daemon_command_args, file_download_command_args, manifest_scan_command_args,
@@ -53,6 +53,52 @@ fn workspace_metrics_count_manifest_versions() {
     assert_eq!(metrics.remote_tracked, 1);
     assert_eq!(metrics.local_only, 1);
     assert_eq!(metrics.trash_entries, 3);
+}
+
+#[test]
+fn pending_manifest_changes_count_created_updated_and_deleted_files() {
+    let root = std::env::temp_dir().join(format!("synchub-desktop-pending-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".synchub")).expect("create metadata dir");
+    std::fs::create_dir_all(root.join("docs")).expect("create docs dir");
+    std::fs::write(root.join("updated.txt"), "new").expect("write updated");
+    std::fs::write(root.join("docs").join("created.txt"), "created").expect("write created");
+    std::fs::write(root.join(".synchub").join("ignored.txt"), "ignored")
+        .expect("write metadata file");
+
+    let snapshot = WorkspaceSnapshot {
+        entry: WorkspaceRegistryEntry {
+            root: root.display().to_string(),
+            remote_path: "/notes".to_string(),
+            ..WorkspaceRegistryEntry::default()
+        },
+        manifest: Some(Manifest {
+            items: vec![
+                ManifestEntry {
+                    relative_path: "updated.txt".to_string(),
+                    size: 3,
+                    sha256: "old-hash".to_string(),
+                    ..ManifestEntry::default()
+                },
+                ManifestEntry {
+                    relative_path: "deleted.txt".to_string(),
+                    size: 7,
+                    sha256: "deleted-hash".to_string(),
+                    ..ManifestEntry::default()
+                },
+            ],
+            ..Manifest::default()
+        }),
+        ..WorkspaceSnapshot::default()
+    };
+
+    let changes = pending_manifest_changes(&snapshot);
+    assert_eq!(changes.created, 1);
+    assert_eq!(changes.updated, 1);
+    assert_eq!(changes.deleted, 1);
+    assert_eq!(changes.total(), 3);
+
+    std::fs::remove_dir_all(root).expect("remove temp workspace");
 }
 
 #[test]

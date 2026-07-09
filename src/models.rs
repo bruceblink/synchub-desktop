@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -111,6 +113,7 @@ pub struct ManifestEntry {
     pub relative_path: String,
     pub size: i64,
     pub sha256: String,
+    pub mtime: Option<String>,
     pub remote_version: Option<i64>,
 }
 
@@ -227,6 +230,7 @@ pub struct WorkspaceSnapshot {
     pub entry: WorkspaceRegistryEntry,
     pub config: Option<WorkspaceConfig>,
     pub manifest: Option<Manifest>,
+    pub pending_changes: PendingManifestChanges,
     pub daemon_state: Option<SyncAgentState>,
     pub daemon_control: Option<SyncAgentControl>,
     pub trash_entries: usize,
@@ -292,6 +296,9 @@ pub struct WorkspaceMetrics {
     pub remote_tracked: usize,
     pub local_only: usize,
     pub pending_local_changes: usize,
+    pub pending_created: usize,
+    pub pending_updated: usize,
+    pub pending_deleted: usize,
     pub trash_entries: usize,
     pub daemon_status: String,
 }
@@ -318,8 +325,133 @@ pub fn workspace_metrics(snapshot: &WorkspaceSnapshot) -> WorkspaceMetrics {
             }
         }
     }
+    let pending = &snapshot.pending_changes;
+    metrics.pending_local_changes = pending.total();
+    metrics.pending_created = pending.created;
+    metrics.pending_updated = pending.updated;
+    metrics.pending_deleted = pending.deleted;
 
     metrics
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PendingManifestChanges {
+    pub created: usize,
+    pub updated: usize,
+    pub deleted: usize,
+}
+
+impl PendingManifestChanges {
+    pub fn total(&self) -> usize {
+        self.created + self.updated + self.deleted
+    }
+}
+
+pub fn pending_manifest_changes(snapshot: &WorkspaceSnapshot) -> PendingManifestChanges {
+    let Some(manifest) = &snapshot.manifest else {
+        return PendingManifestChanges::default();
+    };
+    let root = snapshot.root_path();
+    if root.as_os_str().is_empty() {
+        return PendingManifestChanges::default();
+    }
+
+    let previous = manifest
+        .items
+        .iter()
+        .filter_map(|item| {
+            normalized_relative_path(item).map(|relative| {
+                (
+                    relative,
+                    ManifestFileFingerprint {
+                        size: item.size,
+                        sha256: item.sha256.clone(),
+                    },
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let current = scan_workspace_files(&root);
+
+    let previous_paths = previous.keys().cloned().collect::<HashSet<_>>();
+    let current_paths = current.keys().cloned().collect::<HashSet<_>>();
+
+    let created = current_paths.difference(&previous_paths).count();
+    let deleted = previous_paths.difference(&current_paths).count();
+    let updated = current_paths
+        .intersection(&previous_paths)
+        .filter(|path| previous.get(*path) != current.get(*path))
+        .count();
+
+    PendingManifestChanges {
+        created,
+        updated,
+        deleted,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManifestFileFingerprint {
+    size: i64,
+    sha256: String,
+}
+
+fn normalized_relative_path(item: &ManifestEntry) -> Option<String> {
+    let value = item.relative_path.trim().replace('\\', "/");
+    (!value.is_empty()).then_some(value)
+}
+
+fn scan_workspace_files(root: &PathBuf) -> HashMap<String, ManifestFileFingerprint> {
+    let mut files = HashMap::new();
+    scan_workspace_files_inner(root, root, &mut files);
+    files
+}
+
+fn scan_workspace_files_inner(
+    root: &PathBuf,
+    current: &PathBuf,
+    files: &mut HashMap<String, ManifestFileFingerprint>,
+) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if name.to_str() == Some(".synchub") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            scan_workspace_files_inner(root, &path, files);
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if relative.is_empty() {
+            continue;
+        }
+        let sha256 = file_sha256_hex(&path).unwrap_or_default();
+        files.insert(
+            relative,
+            ManifestFileFingerprint {
+                size: metadata.len() as i64,
+                sha256,
+            },
+        );
+    }
+}
+
+fn file_sha256_hex(path: &PathBuf) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(format!("{:x}", Sha256::digest(bytes)))
 }
 
 pub fn format_bytes(size: i64) -> String {

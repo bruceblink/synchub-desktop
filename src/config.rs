@@ -1,6 +1,6 @@
 use crate::models::{
     CliConfig, Manifest, SyncAgentControl, SyncAgentState, WorkspaceConfig, WorkspaceRegistry,
-    WorkspaceRegistryEntry, WorkspaceSnapshot,
+    WorkspaceRegistryEntry, WorkspaceSnapshot, pending_manifest_changes,
 };
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -126,6 +126,7 @@ pub fn load_workspace_snapshot(entry: WorkspaceRegistryEntry) -> WorkspaceSnapsh
     if let Ok(manifest) = read_optional_json::<Manifest>(&manifest_path) {
         snapshot.manifest = manifest;
     }
+    snapshot.pending_changes = pending_manifest_changes(&snapshot);
     if let Ok(state) =
         read_optional_json::<SyncAgentState>(&root.join(".synchub").join("daemon-state.json"))
     {

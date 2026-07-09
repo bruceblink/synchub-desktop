@@ -369,6 +369,12 @@ impl SyncHubDesktop {
                         colors.warning,
                     ))
                     .child(self.render_metric_tile(
+                        "Pending",
+                        metrics.pending_local_changes.to_string(),
+                        IconName::Search,
+                        colors.warning,
+                    ))
+                    .child(self.render_metric_tile(
                         "Trash",
                         metrics.trash_entries.to_string(),
                         IconName::Inbox,
@@ -979,6 +985,7 @@ impl SyncHubDesktop {
     fn render_workspace_detail(&self) -> impl IntoElement {
         let colors = self.colors;
         if let Some(workspace) = self.current_workspace() {
+            let metrics = workspace_metrics(workspace);
             let device = workspace.device_id();
             let manifest_time = workspace
                 .manifest
@@ -998,6 +1005,16 @@ impl SyncHubDesktop {
                     },
                 ))
                 .child(self.render_detail_row("Manifest", manifest_time))
+                .child(self.render_detail_row(
+                    "Pending",
+                    format!(
+                        "{} total ({} created, {} updated, {} deleted)",
+                        metrics.pending_local_changes,
+                        metrics.pending_created,
+                        metrics.pending_updated,
+                        metrics.pending_deleted
+                    ),
+                ))
                 .when_some(workspace.config_error.as_ref(), |this, error| {
                     this.child(Label::new(error.as_str()).text_color(colors.danger))
                 })
