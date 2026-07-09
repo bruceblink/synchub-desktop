@@ -1,6 +1,7 @@
 use super::commands::{
     run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_sync,
     run_synchub_cli_trash_list, run_synchub_cli_trash_restore, run_synchub_cli_workspace_init,
+    run_synchub_cli_workspace_prune, run_synchub_cli_workspace_remove,
 };
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
@@ -1121,6 +1122,90 @@ impl SyncHubDesktop {
             }
         })
         .detach();
+    }
+
+    pub(super) fn remove_selected_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before removing it", cx);
+            return;
+        };
+        let workspace_root = workspace.root_path();
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_workspace_remove(&workspace_root, &config_path)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("workspace remove failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if result.ok {
+                            this.reload_workspace_list_after_registry_change();
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn prune_workspaces(&mut self, cx: &mut Context<Self>) {
+        let config_path = self.cli_config_path.clone();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    run_synchub_cli_workspace_prune(&config_path)
+                })
+                .await
+                .unwrap_or_else(|error| CommandResult {
+                    ok: false,
+                    summary: format!("workspace prune failed: {error}"),
+                    output: String::new(),
+                });
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        this.command_result = Some(result.clone());
+                        this.message = result.summary.clone();
+                        if result.ok {
+                            this.reload_workspace_list_after_registry_change();
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn reload_workspace_list_after_registry_change(&mut self) {
+        if let Ok(workspaces) = load_workspace_snapshots(&self.registry_path) {
+            let previous = self.selected_workspace;
+            self.workspaces = workspaces;
+            if self.selected_workspace >= self.workspaces.len() {
+                self.selected_workspace = self.workspaces.len().saturating_sub(1);
+            }
+            if previous != self.selected_workspace || self.workspaces.is_empty() {
+                self.files.clear();
+                self.files_next_cursor = None;
+                self.selected_file = None;
+                self.file_versions.clear();
+                self.trash_entries.clear();
+            }
+        }
     }
 
     pub(super) fn save_server(&mut self, cx: &mut Context<Self>) {

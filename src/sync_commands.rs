@@ -55,6 +55,36 @@ pub fn workspace_init_command_args(
     Some(args)
 }
 
+pub fn workspace_remove_command_args(root: &str, config: &str) -> Option<Vec<String>> {
+    let root = root.trim();
+    if root.is_empty() {
+        return None;
+    }
+
+    let mut args = vec![
+        "workspace".to_string(),
+        "remove".to_string(),
+        "--path".to_string(),
+        root.to_string(),
+    ];
+    let config = config.trim();
+    if !config.is_empty() {
+        args.extend(["--config".to_string(), config.to_string()]);
+    }
+    args.push("--json".to_string());
+    Some(args)
+}
+
+pub fn workspace_prune_command_args(config: &str) -> Vec<String> {
+    let mut args = vec!["workspace".to_string(), "prune".to_string()];
+    let config = config.trim();
+    if !config.is_empty() {
+        args.extend(["--config".to_string(), config.to_string()]);
+    }
+    args.push("--json".to_string());
+    args
+}
+
 pub fn file_download_command_args(
     root: &str,
     workspace_config: &str,

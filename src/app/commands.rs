@@ -2,7 +2,8 @@ use super::CommandResult;
 use crate::models::{FileNode, SyncTrashSnapshot, TrashEntry};
 use crate::sync_commands::{
     file_download_command_args, sync_action_label, sync_command_args, trash_list_command_args,
-    trash_restore_command_args, workspace_init_command_args,
+    trash_restore_command_args, workspace_init_command_args, workspace_prune_command_args,
+    workspace_remove_command_args,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -151,6 +152,42 @@ pub(super) fn run_synchub_cli_workspace_init(
         format!("initialized {} workspace(s)", roots.len())
     } else {
         format!("workspace init failed: {}", result.summary)
+    };
+    result
+}
+
+pub(super) fn run_synchub_cli_workspace_remove(
+    workspace_root: &PathBuf,
+    config_path: &PathBuf,
+) -> CommandResult {
+    let root = workspace_root.display().to_string();
+    let config = config_path.display().to_string();
+    let Some(args) = workspace_remove_command_args(&root, &config) else {
+        return CommandResult {
+            ok: false,
+            summary: "workspace path is required".to_string(),
+            output: String::new(),
+        };
+    };
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    result.summary = if result.ok {
+        format!("removed workspace registration {}", root)
+    } else {
+        format!("workspace remove failed: {}", result.summary)
+    };
+    result
+}
+
+pub(super) fn run_synchub_cli_workspace_prune(config_path: &PathBuf) -> CommandResult {
+    let config = config_path.display().to_string();
+    let args = workspace_prune_command_args(&config);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut result = run_command("synchub-cli", &arg_refs);
+    result.summary = if result.ok {
+        "pruned stale workspace registrations".to_string()
+    } else {
+        format!("workspace prune failed: {}", result.summary)
     };
     result
 }

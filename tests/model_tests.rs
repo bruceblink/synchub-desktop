@@ -7,7 +7,8 @@ use synchub_desktop::models::{
 };
 use synchub_desktop::sync_commands::{
     file_download_command_args, parse_workspace_paths, sync_command_args, trash_list_command_args,
-    trash_restore_command_args, workspace_init_command_args,
+    trash_restore_command_args, workspace_init_command_args, workspace_prune_command_args,
+    workspace_remove_command_args,
 };
 
 #[test]
@@ -183,6 +184,42 @@ fn workspace_init_args_support_multiple_paths() {
 #[test]
 fn workspace_init_args_reject_empty_paths() {
     assert!(workspace_init_command_args(&[], "", "C:/cfg/config.json").is_none());
+}
+
+#[test]
+fn workspace_remove_args_unregister_selected_path() {
+    assert_eq!(
+        workspace_remove_command_args("C:/work/notes", "C:/cfg/config.json")
+            .expect("workspace remove args"),
+        vec![
+            "workspace",
+            "remove",
+            "--path",
+            "C:/work/notes",
+            "--config",
+            "C:/cfg/config.json",
+            "--json",
+        ]
+    );
+}
+
+#[test]
+fn workspace_remove_args_reject_empty_path() {
+    assert!(workspace_remove_command_args("", "C:/cfg/config.json").is_none());
+}
+
+#[test]
+fn workspace_prune_args_use_json_output() {
+    assert_eq!(
+        workspace_prune_command_args("C:/cfg/config.json"),
+        vec![
+            "workspace",
+            "prune",
+            "--config",
+            "C:/cfg/config.json",
+            "--json",
+        ]
+    );
 }
 
 #[test]

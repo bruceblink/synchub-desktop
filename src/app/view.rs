@@ -151,12 +151,40 @@ impl SyncHubDesktop {
                     .child(Input::new(&self.workspace_input))
                     .child(Input::new(&self.remote_root_input))
                     .child(
-                        Button::new("init-workspace")
-                            .icon(IconName::Plus)
-                            .label("Init Selected")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| this.init_workspace(cx))),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("init-workspace")
+                                    .icon(IconName::Plus)
+                                    .label("Init")
+                                    .small()
+                                    .ghost()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.init_workspace(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("remove-workspace")
+                                    .icon(IconName::Close)
+                                    .label("Remove")
+                                    .small()
+                                    .ghost()
+                                    .disabled(self.loading || self.workspaces.is_empty())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.remove_selected_workspace(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("prune-workspaces")
+                                    .icon(IconName::Search)
+                                    .label("Prune")
+                                    .small()
+                                    .ghost()
+                                    .disabled(self.loading)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.prune_workspaces(cx)),
+                                    ),
+                            ),
                     ),
             )
             .child(
