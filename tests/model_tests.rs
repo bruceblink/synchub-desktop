@@ -1,9 +1,9 @@
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::models::{
-    Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig, WorkspaceRegistryEntry,
-    WorkspaceSnapshot, compose_remote_directory_path, conflict_resolution_label,
-    file_version_label, format_bytes, is_current_device, is_file_version_pinned, is_success_code,
-    workspace_metrics,
+    ApiEnvelope, ApiStatus, Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig,
+    WorkspaceRegistryEntry, WorkspaceSnapshot, compose_remote_directory_path,
+    conflict_resolution_label, file_version_label, format_bytes, is_current_device,
+    is_file_version_pinned, is_success_code, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     file_download_command_args, manifest_scan_command_args, parse_workspace_paths,
@@ -61,6 +61,29 @@ fn api_success_codes_match_synchub_envelope() {
     assert!(is_success_code(&serde_json::json!("0")));
     assert!(is_success_code(&serde_json::Value::Null));
     assert!(!is_success_code(&serde_json::json!("FILE_CONFLICT")));
+}
+
+#[test]
+fn readiness_status_keeps_component_checks() {
+    let envelope: ApiEnvelope<ApiStatus> = serde_json::from_str(
+        r#"{
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "status": "ready",
+                "checks": {
+                    "database": { "status": "ready" },
+                    "storage": { "status": "ready" }
+                }
+            }
+        }"#,
+    )
+    .expect("readiness envelope");
+    let status = envelope.data.expect("readiness data");
+
+    assert_eq!(status.status, "ready");
+    assert_eq!(status.checks["database"].status, "ready");
+    assert_eq!(status.checks["storage"].status, "ready");
 }
 
 #[test]

@@ -1,4 +1,6 @@
-use super::formatting::{device_name, format_optional, optional_i64, short_hash};
+use super::formatting::{
+    device_name, format_optional, optional_i64, short_hash, sorted_status_checks,
+};
 use super::{AuthMode, MainView, SyncHubDesktop};
 use crate::models::{
     Device, FileNode, FileVersion, SyncConflict, TrashEntry, file_version_label, format_bytes,
@@ -455,6 +457,11 @@ impl SyncHubDesktop {
             .map(|status| status.status.clone())
             .filter(|status| !status.is_empty())
             .unwrap_or_else(|| "unchecked".to_string());
+        let readiness_checks = self
+            .server_ready
+            .as_ref()
+            .map(|status| sorted_status_checks(&status.checks))
+            .unwrap_or_default();
 
         v_flex()
             .size_full()
@@ -515,7 +522,25 @@ impl SyncHubDesktop {
                             .gap_2()
                             .child(self.render_status_badge(health.as_str()))
                             .child(self.render_status_badge(ready.as_str())),
-                    ),
+                    )
+                    .when(!readiness_checks.is_empty(), |this| {
+                        this.child(
+                            v_flex()
+                                .gap_2()
+                                .pt_2()
+                                .mt_1()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .child(
+                                    Label::new("Readiness checks")
+                                        .text_color(colors.muted)
+                                        .text_size(rems(0.82)),
+                                )
+                                .children(readiness_checks.iter().map(|(name, status)| {
+                                    self.render_readiness_check_row(name, status)
+                                })),
+                        )
+                    }),
             )
             .child(
                 v_flex()
@@ -1036,6 +1061,19 @@ impl SyncHubDesktop {
                     .child(Label::new(key).text_color(colors.muted)),
             )
             .child(Label::new(value).text_color(colors.text))
+    }
+
+    fn render_readiness_check_row(&self, name: &str, status: &str) -> impl IntoElement {
+        let colors = self.colors;
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .w(px(88.))
+                    .child(Label::new(name).text_color(colors.text)),
+            )
+            .child(self.render_status_badge(status))
     }
 
     fn render_trash_row(&self, entry: &TrashEntry, cx: &mut Context<Self>) -> impl IntoElement {

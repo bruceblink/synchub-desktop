@@ -1,4 +1,5 @@
 use crate::models::Device;
+use std::collections::BTreeMap;
 pub(super) fn device_name(device: &Device) -> &str {
     if device.name.trim().is_empty() {
         "unnamed device"
@@ -31,6 +32,24 @@ pub(super) fn short_hash(value: &str) -> String {
     }
 }
 
+pub(super) fn sorted_status_checks(
+    checks: &BTreeMap<String, crate::models::StatusCheck>,
+) -> Vec<(String, String)> {
+    checks
+        .iter()
+        .map(|(name, check)| {
+            (
+                name.clone(),
+                if check.status.trim().is_empty() {
+                    "unknown".to_string()
+                } else {
+                    check.status.clone()
+                },
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,5 +58,30 @@ mod tests {
     fn hashes_are_shortened_for_dense_rows() {
         assert_eq!(short_hash("abcdef1234567890"), "abcdef123456...");
         assert_eq!(short_hash("abc"), "abc");
+    }
+
+    #[test]
+    fn status_checks_are_sorted_and_filled() {
+        let mut checks = BTreeMap::new();
+        checks.insert(
+            "storage".to_string(),
+            crate::models::StatusCheck {
+                status: "ready".to_string(),
+            },
+        );
+        checks.insert(
+            "database".to_string(),
+            crate::models::StatusCheck {
+                status: String::new(),
+            },
+        );
+
+        assert_eq!(
+            sorted_status_checks(&checks),
+            vec![
+                ("database".to_string(), "unknown".to_string()),
+                ("storage".to_string(), "ready".to_string()),
+            ]
+        );
     }
 }

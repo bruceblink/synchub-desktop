@@ -1,9 +1,17 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct ApiStatus {
+    pub status: String,
+    #[serde(default)]
+    pub checks: BTreeMap<String, StatusCheck>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct StatusCheck {
     pub status: String,
 }
 
