@@ -110,6 +110,90 @@ impl SyncHubDesktop {
         .detach();
     }
 
+    pub(super) fn refresh_server_metrics(&mut self, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let client = SyncHubClient::new(server)?;
+                    client.metrics().await
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok(metrics) => {
+                                let bytes = metrics.len();
+                                this.server_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: format!("server metrics loaded ({bytes} bytes)"),
+                                    output: metrics,
+                                });
+                            }
+                            Err(error) => {
+                                this.server_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: format!("server metrics failed: {error}"),
+                                    output: String::new(),
+                                });
+                            }
+                        }
+                        if let Some(result) = &this.server_result {
+                            this.message = result.summary.clone();
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_server_openapi(&mut self, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let client = SyncHubClient::new(server)?;
+                    client.openapi().await
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok(spec) => {
+                                let bytes = spec.len();
+                                this.server_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: format!("OpenAPI spec loaded ({bytes} bytes)"),
+                                    output: spec,
+                                });
+                            }
+                            Err(error) => {
+                                this.server_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: format!("OpenAPI load failed: {error}"),
+                                    output: String::new(),
+                                });
+                            }
+                        }
+                        if let Some(result) = &this.server_result {
+                            this.message = result.summary.clone();
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn authenticate(&mut self, mode: AuthMode, cx: &mut Context<Self>) {
         let server = self.current_server(cx);
         let email = self.email_input.read(cx).value().to_string();

@@ -40,6 +40,15 @@ impl SyncHubClient {
         self.request_json(Method::GET, "/readyz", None, None).await
     }
 
+    pub async fn metrics(&self) -> Result<String> {
+        self.request_text(Method::GET, "/metrics", None, None).await
+    }
+
+    pub async fn openapi(&self) -> Result<String> {
+        self.request_text(Method::GET, "/swagger/openapi.yaml", None, None)
+            .await
+    }
+
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginData> {
         self.request_json(
             Method::POST,
@@ -311,6 +320,36 @@ impl SyncHubClient {
         envelope
             .data
             .ok_or_else(|| anyhow!("response data is empty"))
+    }
+
+    async fn request_text(
+        &self,
+        method: Method,
+        path: &str,
+        access_token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Result<String> {
+        let url = endpoint(&self.base_url, path);
+        let mut request = self.client.request(method, url);
+        if let Some(token) = access_token.filter(|token| !token.trim().is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+
+        let response = request.send().await.context("send request")?;
+        let status = response.status();
+        let body = response.text().await.context("decode response")?;
+        if !status.is_success() {
+            if let Ok(envelope) = serde_json::from_str::<ApiEnvelope<serde_json::Value>>(&body) {
+                if !envelope.message.is_empty() {
+                    return Err(anyhow!(envelope.message));
+                }
+            }
+            return Err(anyhow!("request failed with status {}", status.as_u16()));
+        }
+        Ok(body)
     }
 }
 

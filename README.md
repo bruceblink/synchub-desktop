@@ -5,7 +5,7 @@ SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust proje
 ## Current MVP
 
 - Login/register/logout against a SyncHub server.
-- Show server version, health, readiness, and local login profile.
+- Show server version, health, readiness, metrics, OpenAPI spec, and local login profile.
 - Discover registered workspaces from the CLI registry.
 - Initialize one or more workspace folders from the sidebar, optionally under a shared remote root.
 - Remove selected workspace registrations and prune stale registry entries.

@@ -474,6 +474,28 @@ impl SyncHubDesktop {
                             .small()
                             .disabled(self.loading)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_server_status(cx))),
+                    )
+                    .child(
+                        Button::new("server-metrics")
+                            .icon(IconName::Info)
+                            .label("Metrics")
+                            .small()
+                            .ghost()
+                            .disabled(self.loading)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.refresh_server_metrics(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("server-openapi")
+                            .icon(IconName::File)
+                            .label("OpenAPI")
+                            .small()
+                            .ghost()
+                            .disabled(self.loading)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.refresh_server_openapi(cx)),
+                            ),
                     ),
             )
             .child(
@@ -513,6 +535,29 @@ impl SyncHubDesktop {
                         .text_color(colors.muted),
                     ),
             )
+            .when_some(self.server_result.as_ref(), |this, result| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .p_4()
+                        .flex_1()
+                        .overflow_y_scrollbar()
+                        .bg(colors.panel)
+                        .border_1()
+                        .border_color(if result.ok {
+                            colors.success
+                        } else {
+                            colors.danger
+                        })
+                        .rounded_md()
+                        .child(Label::new(result.summary.as_str()).text_color(colors.text))
+                        .child(
+                            Label::new(result.output.as_str())
+                                .text_color(colors.muted)
+                                .text_size(rems(0.78)),
+                        ),
+                )
+            })
     }
 
     fn render_sync(&self, cx: &mut Context<Self>) -> AnyElement {
