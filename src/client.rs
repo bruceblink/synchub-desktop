@@ -185,6 +185,38 @@ impl SyncHubClient {
         .await
     }
 
+    pub async fn list_trash(&self, access_token: &str) -> Result<Vec<FileNode>> {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let path = trash_endpoint(200, cursor.as_deref());
+            let page: FileListData = self
+                .request_json(Method::GET, &path, Some(access_token), None)
+                .await?;
+            items.extend(page.items);
+            cursor = page.next_cursor.filter(|value| !value.trim().is_empty());
+            if cursor.is_none() {
+                return Ok(items);
+            }
+        }
+    }
+
+    pub async fn restore_trash(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<FileNode> {
+        let path = format!("/api/v1/trash/{}/restore", url_escape(file_id));
+        self.request_json(
+            Method::POST,
+            &path,
+            Some(access_token),
+            Some(device_body(device_id)),
+        )
+        .await
+    }
+
     pub async fn list_file_versions(
         &self,
         access_token: &str,
@@ -430,6 +462,15 @@ fn files_endpoint(parent_id: Option<&str>, page_size: u32, cursor: Option<&str>)
     }
 }
 
+fn trash_endpoint(page_size: u32, cursor: Option<&str>) -> String {
+    let mut path = format!("/api/v1/trash?page_size={}", page_size.clamp(1, 200));
+    if let Some(cursor) = cursor.filter(|value| !value.trim().is_empty()) {
+        path.push_str("&cursor=");
+        path.push_str(&url_escape(cursor.trim()));
+    }
+    path
+}
+
 fn url_escape(value: &str) -> String {
     value
         .bytes()
@@ -544,6 +585,15 @@ mod tests {
         assert_eq!(
             files_endpoint(Some("dir 1"), 25, Some("cursor/next")),
             "/api/v1/files?parent_id=dir%201&cursor=cursor%2Fnext&page_size=25"
+        );
+    }
+
+    #[test]
+    fn trash_endpoint_clamps_page_size_and_escapes_cursor() {
+        assert_eq!(trash_endpoint(0, None), "/api/v1/trash?page_size=1");
+        assert_eq!(
+            trash_endpoint(500, Some("next/cursor")),
+            "/api/v1/trash?page_size=200&cursor=next%2Fcursor"
         );
     }
 }

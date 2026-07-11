@@ -155,6 +155,13 @@ pub struct FileNode {
     pub version: i64,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub deleted_at: Option<String>,
+}
+
+pub fn file_belongs_to_remote_root(path: &str, remote_root: &str) -> bool {
+    let path = path.trim().trim_end_matches('/');
+    let root = remote_root.trim().trim_end_matches('/');
+    root.is_empty() || root == "/" || path == root || path.starts_with(&format!("{root}/"))
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

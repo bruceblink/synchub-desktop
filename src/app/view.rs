@@ -221,9 +221,7 @@ impl SyncHubDesktop {
                                 .cursor_pointer()
                                 .hover(|style| style.border_color(colors.accent))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.selected_workspace = index;
-                                    this.active_view = MainView::Overview;
-                                    cx.notify();
+                                    this.select_workspace(index, cx);
                                 }))
                                 .child(
                                     h_flex()
@@ -772,6 +770,11 @@ impl SyncHubDesktop {
 
     fn render_trash(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let cloud_rows = self
+            .cloud_trash
+            .iter()
+            .map(|file| self.render_cloud_trash_row(file, cx).into_any_element())
+            .collect::<Vec<_>>();
         let trash_rows = self
             .trash_entries
             .iter()
@@ -786,14 +789,17 @@ impl SyncHubDesktop {
                     .p_3()
                     .justify_between()
                     .items_center()
-                    .child(Label::new("Local Trash").text_color(colors.text))
+                    .child(Label::new("Deleted files").text_color(colors.text))
                     .child(
                         Button::new("load-trash")
                             .icon(IconName::Redo2)
-                            .label("Load")
+                            .label("Refresh")
                             .small()
                             .disabled(self.loading)
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_trash(cx))),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.refresh_cloud_trash(cx);
+                                this.refresh_trash(cx);
+                            })),
                     ),
             )
             .child(
@@ -802,11 +808,65 @@ impl SyncHubDesktop {
                     .mx_3()
                     .mb_3()
                     .overflow_y_scrollbar()
-                    .bg(colors.panel)
-                    .border_1()
-                    .border_color(colors.border)
-                    .rounded_md()
-                    .children(trash_rows),
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .bg(colors.panel)
+                            .border_1()
+                            .border_color(colors.border)
+                            .rounded_md()
+                            .child(
+                                h_flex()
+                                    .px_3()
+                                    .py_2()
+                                    .justify_between()
+                                    .border_b_1()
+                                    .border_color(colors.border)
+                                    .child(Label::new("Cloud trash").text_color(colors.text))
+                                    .child(
+                                        Label::new(format!("{} items", self.cloud_trash.len()))
+                                            .text_color(colors.muted),
+                                    ),
+                            )
+                            .when(cloud_rows.is_empty(), |this| {
+                                this.child(div().p_4().child(
+                                    Label::new("Cloud trash is empty").text_color(colors.muted),
+                                ))
+                            })
+                            .children(cloud_rows),
+                    )
+                    .child(
+                        v_flex()
+                            .bg(colors.panel)
+                            .border_1()
+                            .border_color(colors.border)
+                            .rounded_md()
+                            .child(
+                                h_flex()
+                                    .px_3()
+                                    .py_2()
+                                    .justify_between()
+                                    .border_b_1()
+                                    .border_color(colors.border)
+                                    .child(
+                                        Label::new("Local deletion protection")
+                                            .text_color(colors.text),
+                                    )
+                                    .child(
+                                        Label::new(format!("{} items", self.trash_entries.len()))
+                                            .text_color(colors.muted),
+                                    ),
+                            )
+                            .when(trash_rows.is_empty(), |this| {
+                                this.child(
+                                    div().p_4().child(
+                                        Label::new("No local protection copies")
+                                            .text_color(colors.muted),
+                                    ),
+                                )
+                            })
+                            .children(trash_rows),
+                    ),
             )
     }
 
@@ -1154,6 +1214,57 @@ impl SyncHubDesktop {
                     .disabled(self.loading)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.restore_trash_entry(entry_for_restore.clone(), cx)
+                    })),
+            )
+    }
+
+    fn render_cloud_trash_row(&self, file: &FileNode, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.colors;
+        let file_for_restore = file.clone();
+        h_flex()
+            .gap_3()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                Icon::new(if file.node_type == "directory" {
+                    IconName::FolderOpen
+                } else {
+                    IconName::File
+                })
+                .small()
+                .text_color(colors.warning),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .child(Label::new(file.path.as_str()).text_color(colors.text))
+                    .child(
+                        Label::new(format_optional(file.deleted_at.as_deref()))
+                            .text_color(colors.muted)
+                            .text_size(rems(0.72)),
+                    ),
+            )
+            .child(
+                Label::new(if file.node_type == "directory" {
+                    "-".to_string()
+                } else {
+                    format_bytes(file.size)
+                })
+                .text_color(colors.muted),
+            )
+            .child(self.render_status_badge(file.node_type.as_str()))
+            .child(
+                Button::new(format!("restore-cloud-trash-{}", file.id))
+                    .icon(IconName::Undo2)
+                    .label("Restore")
+                    .ghost()
+                    .small()
+                    .disabled(self.loading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.restore_cloud_trash(file_for_restore.clone(), cx)
                     })),
             )
     }

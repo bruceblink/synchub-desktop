@@ -12,13 +12,31 @@ use crate::config::{
 };
 use crate::models::{
     CliConfig, Device, FileListData, FileNode, FileVersion, SyncConflict, TrashEntry,
-    compose_remote_directory_path, conflict_resolution_label, file_version_label,
+    compose_remote_directory_path, conflict_resolution_label, file_belongs_to_remote_root,
+    file_version_label,
 };
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
 impl SyncHubDesktop {
+    pub(super) fn select_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index == self.selected_workspace {
+            return;
+        }
+        self.selected_workspace = index;
+        self.files.clear();
+        self.files_next_cursor = None;
+        self.selected_file = None;
+        self.file_versions.clear();
+        self.trash_entries.clear();
+        self.cloud_trash.clear();
+        self.devices.clear();
+        self.conflicts.clear();
+        self.active_view = super::MainView::Overview;
+        cx.notify();
+    }
+
     pub(super) fn reload_local_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cli_config = match load_cli_config(&self.cli_config_path) {
             Ok(config) => config,
@@ -57,6 +75,7 @@ impl SyncHubDesktop {
         self.refresh_server_status(cx);
         self.refresh_files(cx);
         self.refresh_trash(cx);
+        self.refresh_cloud_trash(cx);
         self.refresh_devices(cx);
         self.refresh_conflicts(cx);
     }
@@ -925,6 +944,120 @@ impl SyncHubDesktop {
         .detach();
     }
 
+    pub(super) fn refresh_cloud_trash(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before loading cloud trash", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before loading cloud trash", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = workspace.server_url(&config.server_url);
+        let remote_root = workspace.remote_path();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let trash = client
+                        .list_trash(&config.tokens.access_token)
+                        .await?
+                        .into_iter()
+                        .filter(|file| file_belongs_to_remote_root(&file.path, &remote_root))
+                        .collect::<Vec<_>>();
+                    Ok::<_, anyhow::Error>((config, trash))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, trash)) => {
+                                this.cli_config = Some(config);
+                                this.cloud_trash = trash;
+                                this.message =
+                                    format!("loaded {} cloud trash items", this.cloud_trash.len());
+                            }
+                            Err(error) => {
+                                this.message = format!("load cloud trash failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn restore_cloud_trash(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before restoring cloud trash", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before restoring cloud trash", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = workspace.server_url(&config.server_url);
+        let remote_root = workspace.remote_path();
+        let device_id = workspace.device_id();
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let restored = client
+                        .restore_trash(
+                            &config.tokens.access_token,
+                            &file.id,
+                            Some(device_id.as_str()),
+                        )
+                        .await?;
+                    let trash = client
+                        .list_trash(&config.tokens.access_token)
+                        .await?
+                        .into_iter()
+                        .filter(|item| file_belongs_to_remote_root(&item.path, &remote_root))
+                        .collect::<Vec<_>>();
+                    Ok::<_, anyhow::Error>((config, restored, trash))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, restored, trash)) => {
+                                this.cli_config = Some(config);
+                                this.cloud_trash = trash;
+                                this.message =
+                                    format!("restored {} from cloud trash", restored.path);
+                            }
+                            Err(error) => {
+                                this.message = format!("restore cloud trash failed: {error}")
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn restore_trash_entry(&mut self, entry: TrashEntry, cx: &mut Context<Self>) {
         let Some(workspace) = self.current_workspace().cloned() else {
             self.set_message("select a workspace before restoring trash", cx);
@@ -1302,6 +1435,7 @@ impl SyncHubDesktop {
                 self.selected_file = None;
                 self.file_versions.clear();
                 self.trash_entries.clear();
+                self.cloud_trash.clear();
             }
         }
     }

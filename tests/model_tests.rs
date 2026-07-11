@@ -2,8 +2,9 @@ use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::models::{
     ApiEnvelope, ApiStatus, Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig,
     WorkspaceRegistryEntry, WorkspaceSnapshot, compose_remote_directory_path,
-    conflict_resolution_label, file_version_label, format_bytes, is_current_device,
-    is_file_version_pinned, is_success_code, pending_manifest_changes, workspace_metrics,
+    conflict_resolution_label, file_belongs_to_remote_root, file_version_label, format_bytes,
+    is_current_device, is_file_version_pinned, is_success_code, pending_manifest_changes,
+    workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     daemon_command_args, file_download_command_args, manifest_scan_command_args,
@@ -136,6 +137,17 @@ fn readiness_status_keeps_component_checks() {
 fn bytes_are_human_readable() {
     assert_eq!(format_bytes(512), "512 B");
     assert_eq!(format_bytes(2048), "2.0 KB");
+}
+
+#[test]
+fn cloud_trash_is_scoped_to_the_workspace_remote_root() {
+    assert!(file_belongs_to_remote_root("/notes/deleted.txt", "/notes"));
+    assert!(file_belongs_to_remote_root("/notes", "/notes"));
+    assert!(!file_belongs_to_remote_root(
+        "/notebook/deleted.txt",
+        "/notes"
+    ));
+    assert!(file_belongs_to_remote_root("/anything", "/"));
 }
 
 #[test]
