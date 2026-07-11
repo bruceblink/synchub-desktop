@@ -1,7 +1,8 @@
 use synchub_desktop::client::normalize_base_url;
+use synchub_desktop::config::{load_workspace_registry, update_workspace_server_urls, write_json};
 use synchub_desktop::models::{
     ApiEnvelope, ApiStatus, Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig,
-    WorkspaceRegistryEntry, WorkspaceSnapshot, compose_remote_directory_path,
+    WorkspaceRegistry, WorkspaceRegistryEntry, WorkspaceSnapshot, compose_remote_directory_path,
     conflict_resolution_label, file_belongs_to_remote_root, file_version_label, format_bytes,
     is_current_device, is_file_version_pinned, is_success_code, pending_manifest_changes,
     workspace_metrics,
@@ -22,6 +23,59 @@ fn base_url_is_normalized() {
         normalize_base_url("https://sync.likanug.app/"),
         "https://sync.likanug.app"
     );
+}
+
+#[test]
+fn logged_in_server_updates_registered_workspace_configs() {
+    let root = std::env::temp_dir().join(format!(
+        "synchub-desktop-server-update-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let workspace_root = root.join("workspace");
+    let workspace_config_path = workspace_root.join(".synchub").join("workspace.json");
+    let registry_path = root.join("workspaces.json");
+
+    write_json(
+        &workspace_config_path,
+        &WorkspaceConfig {
+            server_url: "https://old.example".to_string(),
+            ..WorkspaceConfig::default()
+        },
+    )
+    .expect("write workspace config");
+    write_json(
+        &registry_path,
+        &WorkspaceRegistry {
+            version: 1,
+            workspaces: vec![WorkspaceRegistryEntry {
+                root: workspace_root.display().to_string(),
+                workspace_config_path: workspace_config_path.display().to_string(),
+                server_url: "https://old.example".to_string(),
+                ..WorkspaceRegistryEntry::default()
+            }],
+            ..WorkspaceRegistry::default()
+        },
+    )
+    .expect("write workspace registry");
+
+    assert_eq!(
+        update_workspace_server_urls(&registry_path, "https://sync.likanug.app")
+            .expect("update workspace servers"),
+        1
+    );
+    let config: WorkspaceConfig = serde_json::from_str(
+        &std::fs::read_to_string(&workspace_config_path).expect("read workspace config"),
+    )
+    .expect("decode workspace config");
+    let registry = load_workspace_registry(&registry_path).expect("load workspace registry");
+    assert_eq!(config.server_url, "https://sync.likanug.app");
+    assert_eq!(
+        registry.workspaces[0].server_url,
+        "https://sync.likanug.app"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove temp files");
 }
 
 #[test]

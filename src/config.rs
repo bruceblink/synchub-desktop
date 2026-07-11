@@ -104,6 +104,39 @@ pub fn load_workspace_snapshots(registry_path: &Path) -> Result<Vec<WorkspaceSna
     Ok(snapshots)
 }
 
+pub fn update_workspace_server_urls(registry_path: &Path, server_url: &str) -> Result<usize> {
+    let server_url = server_url.trim();
+    if server_url.is_empty() {
+        return Ok(0);
+    }
+
+    let mut registry = load_workspace_registry(registry_path)?;
+    let mut updated = 0;
+    for entry in &mut registry.workspaces {
+        let config_path = if entry.workspace_config_path.trim().is_empty() {
+            PathBuf::from(&entry.root)
+                .join(".synchub")
+                .join("workspace.json")
+        } else {
+            PathBuf::from(&entry.workspace_config_path)
+        };
+
+        if let Some(mut config) = read_optional_json::<WorkspaceConfig>(&config_path)? {
+            if config.server_url != server_url {
+                config.server_url = server_url.to_string();
+                write_json(&config_path, &config)?;
+                updated += 1;
+            }
+        }
+        entry.server_url = server_url.to_string();
+    }
+
+    if !registry.workspaces.is_empty() {
+        write_json(registry_path, &registry)?;
+    }
+    Ok(updated)
+}
+
 pub fn load_workspace_snapshot(entry: WorkspaceRegistryEntry) -> WorkspaceSnapshot {
     let mut snapshot = WorkspaceSnapshot {
         entry,

@@ -9,6 +9,7 @@ use super::{AuthMode, CommandResult, SyncHubDesktop};
 use crate::client::{SyncHubClient, refresh_cli_config_if_needed};
 use crate::config::{
     load_cli_config, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
+    update_workspace_server_urls,
 };
 use crate::models::{
     CliConfig, Device, FileListData, FileNode, FileVersion, SyncConflict, TrashEntry,
@@ -50,6 +51,11 @@ impl SyncHubDesktop {
                 input.set_value(config.server_url.clone(), window, cx);
             });
             self.settings.server_url = config.server_url.clone();
+            if let Err(error) =
+                update_workspace_server_urls(&self.registry_path, &config.server_url)
+            {
+                self.message = format!("update workspace server failed: {error}");
+            }
         }
         self.workspaces = match load_workspace_snapshots(&self.registry_path) {
             Ok(workspaces) => workspaces,
