@@ -40,6 +40,26 @@ pub fn load_settings() -> DesktopSettings {
         .unwrap_or_default()
 }
 
+pub fn load_settings_with_legacy_cli(config_path: &Path) -> DesktopSettings {
+    settings_path()
+        .ok()
+        .map(|path| load_settings_from_paths(&path, config_path))
+        .unwrap_or_default()
+}
+
+pub fn load_settings_from_paths(settings_path: &Path, config_path: &Path) -> DesktopSettings {
+    if let Ok(Some(settings)) = read_optional_json::<DesktopSettings>(settings_path) {
+        return settings;
+    }
+    load_cli_config(config_path)
+        .ok()
+        .flatten()
+        .map(|config| DesktopSettings {
+            server_url: config.server_url,
+        })
+        .unwrap_or_default()
+}
+
 pub fn save_settings(settings: &DesktopSettings) -> Result<()> {
     write_json(&settings_path()?, settings)
 }
@@ -76,6 +96,15 @@ pub fn load_cli_config(config_path: &Path) -> Result<Option<CliConfig>> {
 
 pub fn save_cli_config(config_path: &Path, config: &CliConfig) -> Result<()> {
     write_json(config_path, config)
+}
+
+pub fn update_cli_server_url(config_path: &Path, server_url: &str) -> Result<Option<CliConfig>> {
+    let Some(mut config) = load_cli_config(config_path)? else {
+        return Ok(None);
+    };
+    config.server_url = server_url.to_string();
+    save_cli_config(config_path, &config)?;
+    Ok(Some(config))
 }
 
 pub fn remove_cli_config(config_path: &Path) -> Result<()> {

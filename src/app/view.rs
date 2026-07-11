@@ -63,7 +63,9 @@ impl SyncHubDesktop {
                             .icon(IconName::Check)
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|this, _, _, cx| this.save_server(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_server(window, cx)),
+                            ),
                     )
                     .child(
                         Button::new("check-api")

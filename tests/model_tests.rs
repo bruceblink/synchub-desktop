@@ -1,11 +1,14 @@
 use synchub_desktop::client::normalize_base_url;
-use synchub_desktop::config::{load_workspace_registry, update_workspace_server_urls, write_json};
+use synchub_desktop::config::{
+    DesktopSettings, load_cli_config, load_settings_from_paths, load_workspace_registry,
+    update_cli_server_url, update_workspace_server_urls, write_json,
+};
 use synchub_desktop::models::{
-    ApiEnvelope, ApiStatus, Device, FileVersion, Manifest, ManifestEntry, WorkspaceConfig,
-    WorkspaceRegistry, WorkspaceRegistryEntry, WorkspaceSnapshot, compose_remote_directory_path,
-    conflict_resolution_label, file_belongs_to_remote_root, file_version_label, format_bytes,
-    is_current_device, is_file_version_pinned, is_success_code, pending_manifest_changes,
-    workspace_metrics,
+    ApiEnvelope, ApiStatus, CliConfig, Device, FileVersion, Manifest, ManifestEntry,
+    WorkspaceConfig, WorkspaceRegistry, WorkspaceRegistryEntry, WorkspaceSnapshot,
+    compose_remote_directory_path, conflict_resolution_label, file_belongs_to_remote_root,
+    file_version_label, format_bytes, is_current_device, is_file_version_pinned, is_success_code,
+    pending_manifest_changes, workspace_metrics,
 };
 use synchub_desktop::sync_commands::{
     daemon_command_args, file_download_command_args, manifest_scan_command_args,
@@ -73,6 +76,81 @@ fn logged_in_server_updates_registered_workspace_configs() {
     assert_eq!(
         registry.workspaces[0].server_url,
         "https://sync.likanug.app"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove temp files");
+}
+
+#[test]
+fn desktop_server_updates_cli_config_without_losing_login() {
+    let root = std::env::temp_dir().join(format!(
+        "synchub-desktop-cli-server-update-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let config_path = root.join("config.json");
+    let original = CliConfig {
+        server_url: "https://old.example".to_string(),
+        user: synchub_desktop::models::User {
+            id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            status: "active".to_string(),
+        },
+        tokens: synchub_desktop::models::TokenPair {
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+            expires_in: 900,
+        },
+        ..CliConfig::default()
+    };
+    write_json(&config_path, &original).expect("write CLI config");
+
+    let updated = update_cli_server_url(&config_path, "https://sync.likanug.app")
+        .expect("update CLI server")
+        .expect("existing CLI config");
+    let saved = load_cli_config(&config_path)
+        .expect("load CLI config")
+        .expect("saved CLI config");
+    assert_eq!(updated.server_url, "https://sync.likanug.app");
+    assert_eq!(saved.server_url, "https://sync.likanug.app");
+    assert_eq!(saved.user, original.user);
+    assert_eq!(saved.tokens, original.tokens);
+
+    std::fs::remove_dir_all(root).expect("remove temp files");
+}
+
+#[test]
+fn desktop_settings_are_independent_from_legacy_cli_config() {
+    let root = std::env::temp_dir().join(format!(
+        "synchub-desktop-settings-priority-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let settings_path = root.join("settings.json");
+    let config_path = root.join("config.json");
+    write_json(
+        &config_path,
+        &CliConfig {
+            server_url: "https://legacy-cli.example".to_string(),
+            ..CliConfig::default()
+        },
+    )
+    .expect("write legacy CLI config");
+
+    assert_eq!(
+        load_settings_from_paths(&settings_path, &config_path).server_url,
+        "https://legacy-cli.example"
+    );
+    write_json(
+        &settings_path,
+        &DesktopSettings {
+            server_url: "https://desktop.example".to_string(),
+        },
+    )
+    .expect("write desktop settings");
+    assert_eq!(
+        load_settings_from_paths(&settings_path, &config_path).server_url,
+        "https://desktop.example"
     );
 
     std::fs::remove_dir_all(root).expect("remove temp files");

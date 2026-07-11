@@ -6,10 +6,10 @@ use super::commands::{
 };
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
-use crate::client::{SyncHubClient, refresh_cli_config_if_needed};
+use crate::client::{SyncHubClient, normalize_base_url, refresh_cli_config_if_needed};
 use crate::config::{
     load_cli_config, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
-    update_workspace_server_urls,
+    update_cli_server_url, update_workspace_server_urls,
 };
 use crate::models::{
     CliConfig, Device, FileListData, FileNode, FileVersion, SyncConflict, TrashEntry,
@@ -46,16 +46,19 @@ impl SyncHubDesktop {
                 None
             }
         };
-        if let Some(config) = &self.cli_config {
-            self.server_input.update(cx, |input, cx| {
-                input.set_value(config.server_url.clone(), window, cx);
-            });
-            self.settings.server_url = config.server_url.clone();
-            if let Err(error) =
-                update_workspace_server_urls(&self.registry_path, &config.server_url)
-            {
-                self.message = format!("update workspace server failed: {error}");
+        let server_url = normalize_base_url(&self.settings.server_url);
+        self.settings.server_url = server_url.clone();
+        self.server_input.update(cx, |input, cx| {
+            input.set_value(server_url.clone(), window, cx);
+        });
+        if self.cli_config.is_some() {
+            match update_cli_server_url(&self.cli_config_path, &server_url) {
+                Ok(config) => self.cli_config = config,
+                Err(error) => self.message = format!("update login server failed: {error}"),
             }
+        }
+        if let Err(error) = update_workspace_server_urls(&self.registry_path, &server_url) {
+            self.message = format!("update workspace server failed: {error}");
         }
         self.workspaces = match load_workspace_snapshots(&self.registry_path) {
             Ok(workspaces) => workspaces,
@@ -1482,11 +1485,24 @@ impl SyncHubDesktop {
         .detach();
     }
 
-    pub(super) fn save_server(&mut self, cx: &mut Context<Self>) {
-        self.settings.server_url = self.current_server(cx);
-        match save_settings(&self.settings) {
-            Ok(()) => self.set_message("server saved", cx),
-            Err(error) => self.set_message(format!("save settings failed: {error}"), cx),
+    pub(super) fn save_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let server_url = normalize_base_url(&self.current_server(cx));
+        self.settings.server_url = server_url.clone();
+        let result = (|| {
+            save_settings(&self.settings)?;
+            self.cli_config = update_cli_server_url(&self.cli_config_path, &server_url)?;
+            update_workspace_server_urls(&self.registry_path, &server_url)?;
+            self.workspaces = load_workspace_snapshots(&self.registry_path)?;
+            Ok::<(), anyhow::Error>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.server_input.update(cx, |input, cx| {
+                    input.set_value(server_url, window, cx);
+                });
+                self.set_message("server saved to local configuration", cx);
+            }
+            Err(error) => self.set_message(format!("save server failed: {error}"), cx),
         }
     }
 }

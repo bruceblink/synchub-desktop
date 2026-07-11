@@ -5,7 +5,8 @@ mod time;
 mod view;
 
 use crate::config::{
-    DesktopSettings, default_cli_config_path, default_workspace_registry_path, load_settings,
+    DesktopSettings, default_cli_config_path, default_workspace_registry_path,
+    load_settings_with_legacy_cli, save_settings,
 };
 use crate::models::{
     ApiStatus, CliConfig, Device, FileNode, FileVersion, SyncConflict, TrashEntry, VersionInfo,
@@ -79,7 +80,9 @@ pub struct SyncHubDesktop {
 
 impl SyncHubDesktop {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = load_settings();
+        let cli_config_path = default_cli_config_path();
+        let settings = load_settings_with_legacy_cli(&cli_config_path);
+        let _ = save_settings(&settings);
         let server_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Server URL")
@@ -99,7 +102,6 @@ impl SyncHubDesktop {
         let remote_target_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Move target path"));
 
-        let cli_config_path = default_cli_config_path();
         let registry_path = default_workspace_registry_path(&cli_config_path);
         let mut app = Self {
             server_input,
