@@ -8,8 +8,30 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+
+static WORKSPACE_SYNC_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn try_acquire_workspace_sync(root: &Path) -> Option<OwnedMutexGuard<()>> {
+    let root = root.to_path_buf();
+    let lock = {
+        let mut locks = WORKSPACE_SYNC_LOCKS.lock().ok()?;
+        locks
+            .entry(root)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    };
+    lock.try_lock_owned().ok()
+}
+
+#[cfg(test)]
+fn clear_workspace_sync_locks() {
+    WORKSPACE_SYNC_LOCKS.lock().unwrap().clear();
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncPlanAction {
@@ -795,6 +817,19 @@ fn plan_entry(action: SyncPlanAction, item: &ManifestEntry) -> SyncPlanEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_sync_is_single_flight_per_root() {
+        clear_workspace_sync_locks();
+        let root = Path::new("C:/workspace/one");
+        let other = Path::new("C:/workspace/two");
+
+        let first = try_acquire_workspace_sync(root).unwrap();
+        assert!(try_acquire_workspace_sync(root).is_none());
+        assert!(try_acquire_workspace_sync(other).is_some());
+        drop(first);
+        assert!(try_acquire_workspace_sync(root).is_some());
+    }
     use crate::models::WorkspaceRegistryEntry;
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

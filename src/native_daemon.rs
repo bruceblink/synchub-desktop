@@ -1,7 +1,7 @@
 use crate::client::{SyncHubClient, refresh_cli_config_from_disk};
 use crate::config::{load_cli_config, load_workspace_snapshot, read_optional_json, write_json};
 use crate::models::{SyncAgentControl, SyncAgentState, WorkspaceRegistryEntry};
-use crate::native_sync::execute_sync_once;
+use crate::native_sync::{execute_sync_once, try_acquire_workspace_sync};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -54,6 +54,10 @@ async fn run_daemon(entry: WorkspaceRegistryEntry, config_path: PathBuf, interva
 
 async fn run_cycle(entry: &WorkspaceRegistryEntry, config_path: &Path) {
     let root = PathBuf::from(&entry.root);
+    let Some(_sync_guard) = try_acquire_workspace_sync(&root) else {
+        update_state(&root, |state| state.status = "syncing".to_string());
+        return;
+    };
     update_state(&root, |state| state.status = "running".to_string());
     let result = async {
         let mut login = load_cli_config(config_path)?.context("sign in before starting sync")?;

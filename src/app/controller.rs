@@ -15,7 +15,9 @@ use crate::native_daemon::{reset_state as reset_daemon_state, set_paused, start_
 use crate::native_doctor::run_doctor;
 use crate::native_download::{local_path_for_remote, write_downloaded_file};
 use crate::native_manifest::scan_and_save_manifest;
-use crate::native_sync::{build_sync_plan, execute_pull, execute_push, execute_sync_once};
+use crate::native_sync::{
+    build_sync_plan, execute_pull, execute_push, execute_sync_once, try_acquire_workspace_sync,
+};
 use crate::native_trash::{list_trash_entries, restore_trash_entry as restore_local_trash_entry};
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
@@ -1364,6 +1366,8 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
+                    let _sync_guard = try_acquire_workspace_sync(&workspace.root_path())
+                        .ok_or_else(|| anyhow::anyhow!("this workspace is already syncing"))?;
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let pushed =
@@ -1422,6 +1426,8 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
+                    let _sync_guard = try_acquire_workspace_sync(&workspace.root_path())
+                        .ok_or_else(|| anyhow::anyhow!("this workspace is already syncing"))?;
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let pulled =
@@ -1483,6 +1489,8 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
+                    let _sync_guard = try_acquire_workspace_sync(&workspace.root_path())
+                        .ok_or_else(|| anyhow::anyhow!("this workspace is already syncing"))?;
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let synced =
