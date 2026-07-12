@@ -1,8 +1,7 @@
 use super::CommandResult;
-use crate::models::{FileNode, SyncTrashSnapshot, TrashEntry};
+use crate::models::FileNode;
 use crate::sync_commands::{
     daemon_command_args, file_download_command_args, sync_action_label, sync_command_args,
-    trash_list_command_args, trash_restore_command_args,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -30,87 +29,6 @@ pub(super) fn run_synchub_cli_file_download(
         result.summary = format!("download failed: {}", result.summary);
     }
     result
-}
-
-pub(super) fn run_synchub_cli_trash_list(
-    workspace_root: &PathBuf,
-    workspace_config: &PathBuf,
-) -> (CommandResult, Vec<TrashEntry>) {
-    let root = workspace_root.display().to_string();
-    let config = workspace_config.display().to_string();
-    let Some(args) = trash_list_command_args(&root, &config, 200) else {
-        return (
-            CommandResult {
-                ok: false,
-                summary: "workspace path is required".to_string(),
-                output: String::new(),
-            },
-            Vec::new(),
-        );
-    };
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut result = run_command("synchub-cli", &arg_refs);
-    let entries = if result.ok {
-        match serde_json::from_str::<SyncTrashSnapshot>(&result.output) {
-            Ok(snapshot) => snapshot.items,
-            Err(error) => {
-                result.ok = false;
-                result.summary = format!("decode trash failed: {error}");
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
-    if result.ok {
-        result.summary = format!("loaded {} trash item(s)", entries.len());
-    } else {
-        result.summary = format!("load trash failed: {}", result.summary);
-    }
-    (result, entries)
-}
-
-pub(super) fn run_synchub_cli_trash_restore(
-    workspace_root: &PathBuf,
-    workspace_config: &PathBuf,
-    entry: &TrashEntry,
-) -> (CommandResult, Option<Vec<TrashEntry>>) {
-    let root = workspace_root.display().to_string();
-    let config = workspace_config.display().to_string();
-    let Some(args) = trash_restore_command_args(&root, &config, &entry.batch, &entry.path) else {
-        return (
-            CommandResult {
-                ok: false,
-                summary: "trash batch and entry are required".to_string(),
-                output: String::new(),
-            },
-            None,
-        );
-    };
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut result = run_command("synchub-cli", &arg_refs);
-    if !result.ok {
-        result.summary = format!("restore trash failed: {}", result.summary);
-        return (result, None);
-    }
-
-    let restore_output = result.output.clone();
-    let (list_result, entries) = run_synchub_cli_trash_list(workspace_root, workspace_config);
-    result.output = if list_result.output.trim().is_empty() {
-        restore_output
-    } else {
-        format!("{restore_output}\n{}", list_result.output)
-    };
-    result.ok = list_result.ok;
-    result.summary = if list_result.ok {
-        format!("restored trash item {}", entry.path)
-    } else {
-        format!(
-            "restored {}, but refresh failed: {}",
-            entry.path, list_result.summary
-        )
-    };
-    (result, Some(entries))
 }
 
 pub(super) fn run_synchub_cli_daemon(

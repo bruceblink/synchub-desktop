@@ -1,6 +1,5 @@
 use super::commands::{
     run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_sync,
-    run_synchub_cli_trash_list, run_synchub_cli_trash_restore,
 };
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
@@ -16,6 +15,7 @@ use crate::models::{
     file_version_label,
 };
 use crate::native_manifest::scan_and_save_manifest;
+use crate::native_trash::{list_trash_entries, restore_trash_entry as restore_local_trash_entry};
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
 use std::path::PathBuf;
@@ -915,32 +915,36 @@ impl SyncHubDesktop {
             return;
         };
         let workspace_root = workspace.root_path();
-        let workspace_config = workspace.workspace_config_path();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
-                let (result, entries) = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_trash_list(&workspace_root, &workspace_config)
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    (
-                        CommandResult {
-                            ok: false,
-                            summary: format!("load trash failed: {error}"),
-                            output: String::new(),
-                        },
-                        Vec::new(),
-                    )
-                });
+                let result =
+                    tokio::task::spawn_blocking(move || list_trash_entries(&workspace_root, 200))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("load trash task failed: {error}"))
+                        .and_then(|result| result);
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
-                        if result.ok {
-                            this.trash_entries = entries;
+                        match result {
+                            Ok(entries) => {
+                                this.message = format!("loaded {} trash item(s)", entries.len());
+                                this.command_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                                this.trash_entries = entries;
+                            }
+                            Err(error) => {
+                                this.message = format!("load trash failed: {error}");
+                                this.command_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                            }
                         }
                         if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
                             this.workspaces = workspaces;
@@ -1073,32 +1077,39 @@ impl SyncHubDesktop {
             return;
         };
         let workspace_root = workspace.root_path();
-        let workspace_config = workspace.workspace_config_path();
+        let restored_entry_path = entry.path.clone();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
-                let (result, entries) = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_trash_restore(&workspace_root, &workspace_config, &entry)
+                let result = tokio::task::spawn_blocking(move || {
+                    restore_local_trash_entry(&workspace_root, &entry)?;
+                    list_trash_entries(&workspace_root, 200)
                 })
                 .await
-                .unwrap_or_else(|error| {
-                    (
-                        CommandResult {
-                            ok: false,
-                            summary: format!("restore trash failed: {error}"),
-                            output: String::new(),
-                        },
-                        None,
-                    )
-                });
+                .map_err(|error| anyhow::anyhow!("restore trash task failed: {error}"))
+                .and_then(|result| result);
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
-                        if let Some(entries) = entries {
-                            this.trash_entries = entries;
+                        match result {
+                            Ok(entries) => {
+                                this.message = format!("restored trash item {restored_entry_path}");
+                                this.command_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                                this.trash_entries = entries;
+                            }
+                            Err(error) => {
+                                this.message = format!("restore trash failed: {error}");
+                                this.command_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                            }
                         }
                         if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
                             this.workspaces = workspaces;

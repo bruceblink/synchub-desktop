@@ -229,11 +229,6 @@ pub struct TrashEntry {
     pub is_dir: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct SyncTrashSnapshot {
-    pub items: Vec<TrashEntry>,
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkspaceSnapshot {
     pub entry: WorkspaceRegistryEntry,
