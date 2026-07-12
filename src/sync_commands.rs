@@ -1,19 +1,3 @@
-pub fn sync_command_args(action: &str, root: &str, config: &str) -> Option<Vec<String>> {
-    let mut args = vec!["sync".to_string()];
-    match action {
-        "doctor" => args.push("doctor".to_string()),
-        "once" | "pull" => args.push(action.to_string()),
-        _ => return None,
-    }
-    args.extend([
-        "--path".to_string(),
-        root.to_string(),
-        "--config".to_string(),
-        config.to_string(),
-    ]);
-    Some(args)
-}
-
 pub fn parse_workspace_paths(input: &str) -> Vec<String> {
     input
         .split(['\n', '\r', ';'])

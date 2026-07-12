@@ -1,5 +1,5 @@
 use super::CommandResult;
-use crate::sync_commands::{daemon_command_args, sync_action_label, sync_command_args};
+use crate::sync_commands::daemon_command_args;
 use std::path::PathBuf;
 use std::process::Command;
 pub(super) fn run_synchub_cli_daemon(
@@ -22,30 +22,6 @@ pub(super) fn run_synchub_cli_daemon(
         format!("{} completed", daemon_action_label(action))
     } else {
         format!("{} failed: {}", daemon_action_label(action), result.summary)
-    };
-    result
-}
-
-pub(super) fn run_synchub_cli_sync(
-    action: &str,
-    workspace_root: &PathBuf,
-    config_path: &PathBuf,
-) -> CommandResult {
-    let root = workspace_root.display().to_string();
-    let config = config_path.display().to_string();
-    let Some(args) = sync_command_args(action, &root, &config) else {
-        return CommandResult {
-            ok: false,
-            summary: format!("unknown sync action: {action}"),
-            output: String::new(),
-        };
-    };
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut result = run_command("synchub-cli", &arg_refs);
-    result.summary = if result.ok {
-        format!("{} completed", sync_action_label(action))
-    } else {
-        format!("{} failed: {}", sync_action_label(action), result.summary)
     };
     result
 }

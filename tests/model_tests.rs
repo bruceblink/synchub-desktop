@@ -13,9 +13,7 @@ use synchub_desktop::models::{
     pending_manifest_changes, workspace_metrics,
 };
 use synchub_desktop::native_manifest::scan_and_save_manifest;
-use synchub_desktop::sync_commands::{
-    daemon_command_args, parse_workspace_paths, sync_command_args,
-};
+use synchub_desktop::sync_commands::{daemon_command_args, parse_workspace_paths};
 
 #[test]
 fn base_url_is_normalized() {
@@ -394,29 +392,6 @@ fn conflict_resolution_labels_are_human_readable() {
     assert_eq!(conflict_resolution_label("keep_remote"), "keep remote");
     assert_eq!(conflict_resolution_label("keep_both"), "keep both");
     assert_eq!(conflict_resolution_label("other"), "unknown");
-}
-
-#[test]
-fn sync_command_args_include_workspace_and_config() {
-    assert_eq!(
-        sync_command_args("pull", "C:/work", "C:/cfg/config.json").expect("pull args"),
-        vec![
-            "sync",
-            "pull",
-            "--path",
-            "C:/work",
-            "--config",
-            "C:/cfg/config.json",
-        ]
-    );
-    assert!(sync_command_args("status", "C:/work", "C:/cfg/config.json").is_none());
-    assert!(sync_command_args("dry-run", "C:/work", "C:/cfg/config.json").is_none());
-    assert!(sync_command_args("push", "C:/work", "C:/cfg/config.json").is_none());
-}
-
-#[test]
-fn unknown_sync_command_is_rejected() {
-    assert!(sync_command_args("bogus", "C:/work", "C:/cfg/config.json").is_none());
 }
 
 #[test]
