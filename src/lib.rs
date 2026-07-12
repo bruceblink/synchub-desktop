@@ -5,6 +5,7 @@ pub mod assets;
 pub mod client;
 pub mod config;
 pub mod models;
+pub mod native_daemon;
 pub mod native_doctor;
 pub mod native_download;
 pub mod native_manifest;

@@ -1,4 +1,3 @@
-use super::commands::run_synchub_cli_daemon;
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
 use crate::client::{SyncHubClient, normalize_base_url, refresh_cli_config_if_needed};
@@ -12,6 +11,7 @@ use crate::models::{
     compose_remote_directory_path, conflict_resolution_label, file_belongs_to_remote_root,
     file_version_label,
 };
+use crate::native_daemon::{reset_state as reset_daemon_state, set_paused, start_daemon};
 use crate::native_doctor::run_doctor;
 use crate::native_download::{local_path_for_remote, write_downloaded_file};
 use crate::native_manifest::scan_and_save_manifest;
@@ -19,7 +19,6 @@ use crate::native_sync::{build_sync_plan, execute_pull, execute_push, execute_sy
 use crate::native_trash::{list_trash_entries, restore_trash_entry as restore_local_trash_entry};
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
-use std::path::PathBuf;
 use std::time::SystemTime;
 impl SyncHubDesktop {
     pub(super) fn select_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1603,39 +1602,63 @@ impl SyncHubDesktop {
     }
 
     pub(super) fn run_daemon_command(&mut self, action: &str, cx: &mut Context<Self>) {
-        let workspace_root = self
-            .current_workspace()
-            .map(|workspace| workspace.root_path())
-            .unwrap_or_else(|| PathBuf::from(self.workspace_input.read(cx).value().as_ref()));
-        let config_path = self.cli_config_path.clone();
-        let action = action.to_string();
-        self.set_loading(true, cx);
-        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let mut cx = cx.clone();
-            async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_daemon(&action, &workspace_root, &config_path)
-                })
-                .await
-                .unwrap_or_else(|error| CommandResult {
-                    ok: false,
-                    summary: format!("daemon command failed: {error}"),
-                    output: String::new(),
-                });
-                if let Some(this) = this.upgrade() {
-                    let _ = this.update(&mut cx, |this, cx| {
-                        this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
-                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
-                            this.workspaces = workspaces;
-                        }
-                        cx.notify();
-                    });
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before managing background sync", cx);
+            return;
+        };
+        let root = workspace.root_path();
+        let key = root.display().to_string();
+        let result = match action {
+            "start" => {
+                let running = self
+                    .daemon_tasks
+                    .get(&key)
+                    .is_some_and(|task| !task.is_finished());
+                if running {
+                    Ok("Background sync is already running".to_string())
+                } else {
+                    set_paused(&root, false).map(|_| {
+                        let task = start_daemon(workspace.entry, self.cli_config_path.clone());
+                        self.daemon_tasks.insert(key, task);
+                        "Background sync started".to_string()
+                    })
                 }
             }
-        })
-        .detach();
+            "pause" => set_paused(&root, true).map(|_| "Background sync paused".to_string()),
+            "resume" => set_paused(&root, false).map(|_| "Background sync resumed".to_string()),
+            "reset-state" => {
+                reset_daemon_state(&root).map(|_| "Background sync state reset".to_string())
+            }
+            "status" => Ok(if self
+                .daemon_tasks
+                .get(&key)
+                .is_some_and(|task| !task.is_finished())
+            {
+                "Background sync is running"
+            } else {
+                "Background sync is not running"
+            }
+            .to_string()),
+            _ => Err(anyhow::anyhow!("unknown background sync action: {action}")),
+        };
+        let command_result = match result {
+            Ok(summary) => CommandResult {
+                ok: true,
+                summary,
+                output: String::new(),
+            },
+            Err(error) => CommandResult {
+                ok: false,
+                summary: format!("background sync failed: {error:#}"),
+                output: String::new(),
+            },
+        };
+        self.message = command_result.summary.clone();
+        self.command_result = Some(command_result);
+        if let Ok(workspaces) = load_workspace_snapshots(&self.registry_path) {
+            self.workspaces = workspaces;
+        }
+        cx.notify();
     }
 
     pub(super) fn init_workspace(&mut self, cx: &mut Context<Self>) {

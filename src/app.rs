@@ -1,4 +1,3 @@
-mod commands;
 mod controller;
 mod formatting;
 pub(crate) mod time;
@@ -15,7 +14,9 @@ use crate::models::{
 use crate::theme::ThemeColors;
 use gpui::*;
 use gpui_component::input::InputState;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use tokio::task::JoinHandle;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MainView {
@@ -75,6 +76,7 @@ pub struct SyncHubDesktop {
     loading: bool,
     message: String,
     command_result: Option<CommandResult>,
+    daemon_tasks: HashMap<String, JoinHandle<()>>,
     colors: ThemeColors,
 }
 
@@ -135,6 +137,7 @@ impl SyncHubDesktop {
             loading: false,
             message: String::new(),
             command_result: None,
+            daemon_tasks: HashMap::new(),
             colors: ThemeColors::default(),
         };
         app.reload_local_state(window, cx);

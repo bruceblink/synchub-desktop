@@ -13,7 +13,7 @@ use synchub_desktop::models::{
     pending_manifest_changes, workspace_metrics,
 };
 use synchub_desktop::native_manifest::scan_and_save_manifest;
-use synchub_desktop::sync_commands::{daemon_command_args, parse_workspace_paths};
+use synchub_desktop::sync_commands::parse_workspace_paths;
 
 #[test]
 fn base_url_is_normalized() {
@@ -544,28 +544,6 @@ fn native_workspace_registry_manages_full_lifecycle() {
     );
 
     std::fs::remove_dir_all(root).expect("remove temp files");
-}
-
-#[test]
-fn daemon_reset_state_args_target_selected_workspace() {
-    assert_eq!(
-        daemon_command_args("reset-state", "C:/work", "C:/cfg/config.json")
-            .expect("daemon reset args"),
-        vec![
-            "sync",
-            "daemon",
-            "--reset-state",
-            "--path",
-            "C:/work",
-            "--config",
-            "C:/cfg/config.json",
-        ]
-    );
-}
-
-#[test]
-fn daemon_args_reject_unknown_action() {
-    assert!(daemon_command_args("restart", "C:/work", "C:/cfg/config.json").is_none());
 }
 
 #[test]
