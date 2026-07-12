@@ -1,3 +1,4 @@
+use sha2::Digest;
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::config::{
     DesktopSettings, load_cli_config, load_settings_from_paths, load_workspace_registry,
@@ -10,10 +11,11 @@ use synchub_desktop::models::{
     file_version_label, format_bytes, is_current_device, is_file_version_pinned, is_success_code,
     pending_manifest_changes, workspace_metrics,
 };
+use synchub_desktop::native_manifest::scan_and_save_manifest;
 use synchub_desktop::sync_commands::{
-    daemon_command_args, file_download_command_args, manifest_scan_command_args,
-    parse_workspace_paths, sync_command_args, trash_list_command_args, trash_restore_command_args,
-    workspace_init_command_args, workspace_prune_command_args, workspace_remove_command_args,
+    daemon_command_args, file_download_command_args, parse_workspace_paths, sync_command_args,
+    trash_list_command_args, trash_restore_command_args, workspace_init_command_args,
+    workspace_prune_command_args, workspace_remove_command_args,
 };
 
 #[test]
@@ -235,6 +237,75 @@ fn pending_manifest_changes_count_created_updated_and_deleted_files() {
 }
 
 #[test]
+fn native_manifest_scan_preserves_versions_and_applies_ignores() {
+    let root = std::env::temp_dir().join(format!(
+        "synchub-desktop-native-manifest-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".synchub")).expect("create metadata directory");
+    std::fs::create_dir_all(root.join("docs")).expect("create docs directory");
+    std::fs::create_dir_all(root.join("build")).expect("create ignored directory");
+    std::fs::write(root.join("docs").join("same.txt"), "same").expect("write same file");
+    std::fs::write(root.join("changed.txt"), "new").expect("write changed file");
+    std::fs::write(root.join("draft.tmp"), "ignored").expect("write ignored file");
+    std::fs::write(root.join("build").join("output.bin"), "ignored")
+        .expect("write ignored directory file");
+    std::fs::write(root.join(".synchub").join("secret"), "metadata").expect("write metadata file");
+    std::fs::write(root.join(".synchubignore"), "*.tmp\nbuild/\n").expect("write ignore file");
+
+    let snapshot = WorkspaceSnapshot {
+        entry: WorkspaceRegistryEntry {
+            root: root.display().to_string(),
+            remote_path: "/workspace".to_string(),
+            ..WorkspaceRegistryEntry::default()
+        },
+        manifest: Some(Manifest {
+            items: vec![
+                ManifestEntry {
+                    relative_path: "docs/same.txt".to_string(),
+                    size: 4,
+                    sha256: format!("{:x}", sha2::Sha256::digest(b"same")),
+                    remote_version: Some(7),
+                    ..ManifestEntry::default()
+                },
+                ManifestEntry {
+                    relative_path: "changed.txt".to_string(),
+                    size: 3,
+                    sha256: format!("{:x}", sha2::Sha256::digest(b"old")),
+                    remote_version: Some(4),
+                    ..ManifestEntry::default()
+                },
+            ],
+            ..Manifest::default()
+        }),
+        ..WorkspaceSnapshot::default()
+    };
+
+    let manifest = scan_and_save_manifest(&snapshot).expect("scan native manifest");
+    let paths = manifest
+        .items
+        .iter()
+        .map(|item| item.relative_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec![".synchubignore", "changed.txt", "docs/same.txt"]
+    );
+    assert_eq!(manifest.items[1].remote_version, None);
+    assert_eq!(manifest.items[2].remote_version, Some(7));
+    assert_eq!(manifest.items[2].path, "/workspace/docs/same.txt");
+    let saved: Manifest = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".synchub").join("manifest.json"))
+            .expect("read saved manifest"),
+    )
+    .expect("decode saved manifest");
+    assert_eq!(saved, manifest);
+
+    std::fs::remove_dir_all(root).expect("remove temp workspace");
+}
+
+#[test]
 fn api_success_codes_match_synchub_envelope() {
     assert!(is_success_code(&serde_json::json!(0)));
     assert!(is_success_code(&serde_json::json!("0")));
@@ -433,28 +504,6 @@ fn workspace_prune_args_use_json_output() {
             "--json",
         ]
     );
-}
-
-#[test]
-fn manifest_scan_args_write_json_result() {
-    assert_eq!(
-        manifest_scan_command_args("C:/work", "C:/work/.synchub/workspace.json")
-            .expect("manifest scan args"),
-        vec![
-            "manifest",
-            "scan",
-            "--path",
-            "C:/work",
-            "--workspace-config",
-            "C:/work/.synchub/workspace.json",
-            "--json",
-        ]
-    );
-}
-
-#[test]
-fn manifest_scan_args_reject_empty_path() {
-    assert!(manifest_scan_command_args("", "C:/work/.synchub/workspace.json").is_none());
 }
 
 #[test]

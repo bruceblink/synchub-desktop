@@ -1,9 +1,9 @@
 use super::CommandResult;
 use crate::models::{FileNode, SyncTrashSnapshot, TrashEntry};
 use crate::sync_commands::{
-    daemon_command_args, file_download_command_args, manifest_scan_command_args, sync_action_label,
-    sync_command_args, trash_list_command_args, trash_restore_command_args,
-    workspace_init_command_args, workspace_prune_command_args, workspace_remove_command_args,
+    daemon_command_args, file_download_command_args, sync_action_label, sync_command_args,
+    trash_list_command_args, trash_restore_command_args, workspace_init_command_args,
+    workspace_prune_command_args, workspace_remove_command_args,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -193,29 +193,6 @@ pub(super) fn run_synchub_cli_workspace_prune(config_path: &PathBuf) -> CommandR
         "pruned stale workspace registrations".to_string()
     } else {
         format!("workspace prune failed: {}", result.summary)
-    };
-    result
-}
-
-pub(super) fn run_synchub_cli_manifest_scan(
-    workspace_root: &PathBuf,
-    workspace_config: &PathBuf,
-) -> CommandResult {
-    let root = workspace_root.display().to_string();
-    let workspace_config = workspace_config.display().to_string();
-    let Some(args) = manifest_scan_command_args(&root, &workspace_config) else {
-        return CommandResult {
-            ok: false,
-            summary: "workspace path is required".to_string(),
-            output: String::new(),
-        };
-    };
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut result = run_command("synchub-cli", &arg_refs);
-    result.summary = if result.ok {
-        format!("scanned manifest for {}", root)
-    } else {
-        format!("manifest scan failed: {}", result.summary)
     };
     result
 }

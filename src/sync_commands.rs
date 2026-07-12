@@ -85,29 +85,6 @@ pub fn workspace_prune_command_args(config: &str) -> Vec<String> {
     args
 }
 
-pub fn manifest_scan_command_args(root: &str, workspace_config: &str) -> Option<Vec<String>> {
-    let root = root.trim();
-    if root.is_empty() {
-        return None;
-    }
-
-    let mut args = vec![
-        "manifest".to_string(),
-        "scan".to_string(),
-        "--path".to_string(),
-        root.to_string(),
-    ];
-    let workspace_config = workspace_config.trim();
-    if !workspace_config.is_empty() {
-        args.extend([
-            "--workspace-config".to_string(),
-            workspace_config.to_string(),
-        ]);
-    }
-    args.push("--json".to_string());
-    Some(args)
-}
-
 pub fn file_download_command_args(
     root: &str,
     workspace_config: &str,

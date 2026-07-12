@@ -5,6 +5,7 @@ pub mod assets;
 pub mod client;
 pub mod config;
 pub mod models;
+pub mod native_manifest;
 pub mod sync_commands;
 pub mod theme;
 

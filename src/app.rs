@@ -1,7 +1,7 @@
 mod commands;
 mod controller;
 mod formatting;
-mod time;
+pub(crate) mod time;
 mod view;
 
 use crate::config::{

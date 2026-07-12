@@ -1,5 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
-pub(super) fn rfc3339_from_system_time(time: SystemTime) -> String {
+pub(crate) fn rfc3339_from_system_time(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

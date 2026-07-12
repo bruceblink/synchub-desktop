@@ -1,6 +1,6 @@
 # SyncHub Desktop
 
-SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust project that talks to the SyncHub HTTP API and reads the same local CLI config/workspace files where useful.
+SyncHub Desktop is the native GPUI sync client for SyncHub. It talks directly to the SyncHub HTTP API and is progressively replacing the legacy CLI runtime.
 
 ## Current MVP
 
@@ -10,7 +10,7 @@ SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust proje
 - Initialize one or more workspace folders from the sidebar, optionally under a shared remote root.
 - Remove selected workspace registrations and prune stale registry entries.
 - Show workspace manifest, pending local changes, trash, daemon state, and pending remote conflicts.
-- Scan the selected workspace manifest from the desktop app.
+- Scan and persist workspace manifests natively, including `.synchubignore`, SHA-256 fingerprints, and remote-version continuity.
 - List remote files for the selected workspace.
 - Create remote folders in the selected workspace.
 - Move or rename remote files and folders from the selected workspace.
@@ -21,7 +21,7 @@ SyncHub Desktop is a native GPUI client for SyncHub. It is a separate Rust proje
 - List and restore cloud trash separately from local deletion-protection copies.
 - List registered sync devices and highlight the current workspace device.
 - Run common sync commands for the selected workspace: status, doctor, dry run, sync once, push, and pull.
-- Start, pause, resume, and inspect the SyncHub CLI daemon by shelling out to `synchub-cli`.
+- Transitional CLI-backed sync, local trash, workspace registration, download, and daemon controls while those engines move into the desktop process.
 
 ## Build
 
@@ -31,4 +31,4 @@ GPUI on Windows needs the native MSVC toolchain. Use Developer PowerShell for VS
 cargo run
 ```
 
-The app stores its own desktop preferences under the platform config directory and reuses the SyncHub CLI files under the user `SyncHub` config directory by default.
+The app stores authoritative desktop preferences under the platform config directory. Legacy CLI files remain only for migration compatibility while the remaining engines move into the desktop process.
