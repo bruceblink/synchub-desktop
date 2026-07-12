@@ -1,5 +1,5 @@
 use crate::client::SyncHubClient;
-use crate::config::save_workspace_config;
+use crate::config::{load_workspace_snapshot, save_workspace_config};
 use crate::models::{ChangeEvent, Manifest, ManifestEntry, WorkspaceSnapshot};
 use crate::native_manifest::{scan_current_manifest, write_manifest};
 use anyhow::{Context, Result, bail};
@@ -101,6 +101,88 @@ pub struct PullResult {
     pub conflicts: usize,
     pub trashed: usize,
     pub cursor: i64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncOnceResult {
+    pub push: PushResult,
+    pub pull: PullResult,
+}
+
+impl SyncOnceResult {
+    pub fn summary(&self) -> String {
+        format!("{}; {}", self.push.summary(), self.pull.summary())
+    }
+}
+
+pub async fn execute_sync_once(
+    client: &SyncHubClient,
+    access_token: &str,
+    workspace: &WorkspaceSnapshot,
+) -> Result<SyncOnceResult> {
+    let workspace = ensure_workspace_device(client, access_token, workspace).await?;
+    let device_id = workspace.device_id();
+    let result = async {
+        let push = execute_push(client, access_token, &workspace).await?;
+        let refreshed = load_workspace_snapshot(workspace.entry.clone());
+        let pull = execute_pull(client, access_token, &refreshed).await?;
+        Ok::<_, anyhow::Error>(SyncOnceResult { push, pull })
+    }
+    .await;
+    let error = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let status = if result.is_ok() { "success" } else { "error" };
+    // Reporting is best effort; the sync result remains the primary outcome.
+    let _ = client
+        .report_device_sync(access_token, &device_id, status, &error)
+        .await;
+    result
+}
+
+async fn ensure_workspace_device(
+    client: &SyncHubClient,
+    access_token: &str,
+    workspace: &WorkspaceSnapshot,
+) -> Result<WorkspaceSnapshot> {
+    let mut config = workspace
+        .config
+        .clone()
+        .context("workspace configuration is missing")?;
+    let device = if let Some(device_id) = config
+        .device_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        client
+            .report_device_sync(access_token, device_id, "", "")
+            .await?
+    } else {
+        let name = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| workspace.display_name());
+        client
+            .register_device(access_token, &name, std::env::consts::OS)
+            .await?
+    };
+    config.device_id = Some(device.id);
+    config.device_name = Some(device.name);
+    config.device_platform = Some(device.platform);
+    config.last_applied_change_id = Some(
+        config
+            .last_applied_change_id
+            .unwrap_or_default()
+            .max(device.last_applied_change_id),
+    );
+    config.updated_at = Some(crate::app::time::rfc3339_from_system_time(SystemTime::now()));
+    save_workspace_config(&workspace.workspace_config_path(), &config)?;
+    let mut workspace = workspace.clone();
+    workspace.config = Some(config);
+    Ok(workspace)
 }
 
 impl PullResult {

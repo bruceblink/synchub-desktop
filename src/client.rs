@@ -401,6 +401,38 @@ impl SyncHubClient {
             .await
     }
 
+    pub async fn register_device(
+        &self,
+        access_token: &str,
+        name: &str,
+        platform: &str,
+    ) -> Result<Device> {
+        self.request_json(
+            Method::POST,
+            "/api/v1/devices",
+            Some(access_token),
+            Some(json!({ "name": name, "platform": platform })),
+        )
+        .await
+    }
+
+    pub async fn report_device_sync(
+        &self,
+        access_token: &str,
+        device_id: &str,
+        status: &str,
+        error: &str,
+    ) -> Result<Device> {
+        let path = format!("/api/v1/devices/{}/heartbeat", url_escape(device_id));
+        self.request_json(
+            Method::POST,
+            &path,
+            Some(access_token),
+            Some(json!({ "status": status, "error": error })),
+        )
+        .await
+    }
+
     pub async fn list_changes(
         &self,
         access_token: &str,
