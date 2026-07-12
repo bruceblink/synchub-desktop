@@ -1742,38 +1742,64 @@ impl Render for SyncHubDesktop {
                                 })
                                 .ghost()
                                 .small()
+                                .disabled(self.initializing)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.refresh_all(window, cx)),
                                 ),
                         ),
                 ),
             )
-            .child(self.render_auth_panel(layout.compact, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .size_full()
-                    .overflow_hidden()
-                    .when(layout.compact, |this| this.flex_col())
-                    .when(!layout.compact, |this| this.flex_row())
-                    .child(self.render_sidebar(layout.compact, layout.narrow, cx))
+            .when(self.initializing, |this| {
+                this.child(
+                    v_flex()
+                        .flex_1()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .gap_4()
+                        .child(svg().path("branding/logo-mark.svg").size_16())
+                        .child(
+                            Label::new("SyncHub Desktop")
+                                .text_color(colors.text)
+                                .text_size(rems(1.25)),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Icon::new(IconName::Loader).text_color(colors.accent))
+                                .child(Label::new("Loading workspaces").text_color(colors.muted)),
+                        ),
+                )
+            })
+            .when(!self.initializing, |this| {
+                this.child(self.render_auth_panel(layout.compact, cx))
                     .child(
-                        v_flex()
+                        div()
+                            .flex()
                             .flex_1()
                             .size_full()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(self.render_tabs(cx))
+                            .overflow_hidden()
+                            .when(layout.compact, |this| this.flex_col())
+                            .when(!layout.compact, |this| this.flex_row())
+                            .child(self.render_sidebar(layout.compact, layout.narrow, cx))
                             .child(
-                                div()
+                                v_flex()
                                     .flex_1()
+                                    .size_full()
+                                    .min_w_0()
                                     .min_h_0()
-                                    .overflow_y_scrollbar()
-                                    .child(self.render_content(cx)),
+                                    .child(self.render_tabs(cx))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_y_scrollbar()
+                                            .child(self.render_content(cx)),
+                                    ),
                             ),
-                    ),
-            )
+                    )
+            })
     }
 }
 

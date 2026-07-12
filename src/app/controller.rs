@@ -82,7 +82,7 @@ impl SyncHubDesktop {
         cx.notify();
     }
 
-    fn start_registered_workspace_daemons(&mut self) {
+    pub(super) fn start_registered_workspace_daemons(&mut self) {
         if self.cli_config.is_none() {
             return;
         }
