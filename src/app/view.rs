@@ -75,14 +75,6 @@ impl SyncHubDesktop {
                             ),
                     )
                     .child(
-                        Button::new("check-api")
-                            .icon(IconName::Info)
-                            .label("Ready")
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_api(cx))),
-                    )
-                    .child(
                         self.render_status_badge(self.api_status.as_deref().unwrap_or("unchecked")),
                     ),
             )
@@ -108,7 +100,7 @@ impl SyncHubDesktop {
                         .child(
                             Button::new("login")
                                 .icon(IconName::User)
-                                .label("Login")
+                                .label("Sign in")
                                 .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.authenticate(AuthMode::Login, cx)
@@ -117,7 +109,7 @@ impl SyncHubDesktop {
                         .child(
                             Button::new("register")
                                 .icon(IconName::Plus)
-                                .label("Register")
+                                .label("Create account")
                                 .ghost()
                                 .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -311,30 +303,9 @@ impl SyncHubDesktop {
                 "Overview",
                 cx,
             ))
-            .child(self.render_nav_button(
-                "server",
-                MainView::Server,
-                IconName::Globe,
-                "Server",
-                cx,
-            ))
             .child(self.render_nav_button("files", MainView::Files, IconName::File, "Files", cx))
-            .child(self.render_nav_button(
-                "versions",
-                MainView::Versions,
-                IconName::Calendar,
-                "Versions",
-                cx,
-            ))
-            .child(self.render_nav_button("trash", MainView::Trash, IconName::Inbox, "Trash", cx))
             .child(self.render_nav_button("sync", MainView::Sync, IconName::Redo2, "Sync", cx))
-            .child(self.render_nav_button(
-                "devices",
-                MainView::Devices,
-                IconName::HardDrive,
-                "Devices",
-                cx,
-            ))
+            .child(self.render_nav_button("trash", MainView::Trash, IconName::Inbox, "Trash", cx))
             .child(self.render_nav_button(
                 "conflicts",
                 MainView::Conflicts,
@@ -342,11 +313,33 @@ impl SyncHubDesktop {
                 "Conflicts",
                 cx,
             ))
-            .child(self.render_nav_button(
+            .child(div().flex_1())
+            .child(self.render_tool_nav_button(
+                "server",
+                MainView::Server,
+                IconName::Globe,
+                "Server status",
+                cx,
+            ))
+            .child(self.render_tool_nav_button(
+                "versions",
+                MainView::Versions,
+                IconName::Calendar,
+                "File versions",
+                cx,
+            ))
+            .child(self.render_tool_nav_button(
+                "devices",
+                MainView::Devices,
+                IconName::HardDrive,
+                "Devices",
+                cx,
+            ))
+            .child(self.render_tool_nav_button(
                 "daemon",
                 MainView::Daemon,
                 IconName::SquareTerminal,
-                "Daemon",
+                "Background sync",
                 cx,
             ))
     }
@@ -429,9 +422,19 @@ impl SyncHubDesktop {
                             )
                             .child(div().flex_1())
                             .child(
+                                Button::new("overview-sync-now")
+                                    .icon(IconName::Redo2)
+                                    .label("Sync Now")
+                                    .small()
+                                    .disabled(self.loading || self.current_workspace().is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.run_sync_command("once", cx)
+                                    })),
+                            )
+                            .child(
                                 Button::new("scan-manifest")
                                     .icon(IconName::Search)
-                                    .label("Scan Manifest")
+                                    .tooltip("Scan local files")
                                     .small()
                                     .ghost()
                                     .disabled(self.loading || self.current_workspace().is_none())
@@ -626,9 +629,6 @@ impl SyncHubDesktop {
             .gap_2()
             .child(self.render_sync_button("sync-once", "once", IconName::Redo2, false, cx))
             .child(self.render_sync_button("sync-dry-run", "dry-run", IconName::Search, true, cx))
-            .child(self.render_sync_button("sync-push", "push", IconName::ArrowUp, true, cx))
-            .child(self.render_sync_button("sync-pull", "pull", IconName::ArrowDown, true, cx))
-            .child(self.render_sync_button("sync-status", "status", IconName::Info, true, cx))
             .child(self.render_sync_button("sync-doctor", "doctor", IconName::Check, true, cx))
             .into_any_element();
         let workspace = v_flex()
@@ -1695,6 +1695,31 @@ impl SyncHubDesktop {
                 cx.notify();
             }))
     }
+
+    fn render_tool_nav_button(
+        &self,
+        id: &'static str,
+        view: MainView,
+        icon: IconName,
+        tooltip: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = self.colors;
+        Button::new(id)
+            .icon(icon)
+            .tooltip(tooltip)
+            .ghost()
+            .small()
+            .when(self.active_view == view, |button| {
+                button
+                    .bg(alpha(colors.accent, 0.10))
+                    .text_color(colors.accent)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.active_view = view;
+                cx.notify();
+            }))
+    }
 }
 
 impl Render for SyncHubDesktop {
@@ -1740,7 +1765,13 @@ impl Render for SyncHubDesktop {
                             .min_w_0()
                             .min_h_0()
                             .child(self.render_tabs(cx))
-                            .child(self.render_content(cx)),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scrollbar()
+                                    .child(self.render_content(cx)),
+                            ),
                     ),
             )
     }

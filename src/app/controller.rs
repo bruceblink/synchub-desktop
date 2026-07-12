@@ -107,21 +107,17 @@ impl SyncHubDesktop {
         self.refresh_conflicts(cx);
     }
 
-    pub(super) fn refresh_api(&mut self, cx: &mut Context<Self>) {
-        self.refresh_server_status(cx);
-    }
-
     pub(super) fn refresh_server_status(&mut self, cx: &mut Context<Self>) {
         let server = self.current_server(cx);
+        self.api_status = Some("checking".to_string());
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let result = async {
                     let client = SyncHubClient::new(server)?;
-                    let version = client.version().await?;
-                    let health = client.health().await?;
-                    let ready = client.ready().await?;
+                    let (version, health, ready) =
+                        tokio::try_join!(client.version(), client.health(), client.ready())?;
                     Ok::<_, anyhow::Error>((version, health, ready))
                 }
                 .await;
@@ -151,6 +147,30 @@ impl SyncHubDesktop {
                         cx.notify();
                     });
                 }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn check_api_status(&mut self, cx: &mut Context<Self>) {
+        let server = self.current_server(cx);
+        self.api_status = Some("checking".to_string());
+        cx.notify();
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = SyncHubClient::new(server)?.ready().await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.api_status = Some(match result {
+                            Ok(ready) if ready.status.is_empty() => "ready".to_string(),
+                            Ok(ready) => ready.status,
+                            Err(_) => "unreachable".to_string(),
+                        });
+                        cx.notify();
+                    });
+                }
+                Ok::<(), anyhow::Error>(())
             }
         })
         .detach();
@@ -1866,6 +1886,7 @@ impl SyncHubDesktop {
                     input.set_value(server_url, window, cx);
                 });
                 self.set_message("server saved to local configuration", cx);
+                self.check_api_status(cx);
             }
             Err(error) => self.set_message(format!("save server failed: {error}"), cx),
         }

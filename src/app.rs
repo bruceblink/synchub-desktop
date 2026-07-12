@@ -141,6 +141,7 @@ impl SyncHubDesktop {
             colors: ThemeColors::default(),
         };
         app.reload_local_state(window, cx);
+        app.check_api_status(cx);
         app
     }
 
