@@ -1,7 +1,7 @@
 use crate::models::{
-    ApiEnvelope, ApiStatus, CliConfig, DeviceListData, FileListData, FileNode, FileVersion,
-    FileVersionListData, LoginData, RestoreFileVersionData, SyncConflict, SyncConflictListData,
-    TokenPair, VersionInfo, is_success_code,
+    ApiEnvelope, ApiStatus, CliConfig, CommitUploadData, DeviceListData, FileListData, FileNode,
+    FileVersion, FileVersionListData, LoginData, RestoreFileVersionData, SyncConflict,
+    SyncConflictListData, TokenPair, UploadChunk, UploadSession, VersionInfo, is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -211,6 +211,84 @@ impl SyncHubClient {
         .await
     }
 
+    pub async fn delete_file_versioned(
+        &self,
+        access_token: &str,
+        file_id: &str,
+        device_id: Option<&str>,
+        base_version: Option<i64>,
+    ) -> Result<()> {
+        let path = format!("/api/v1/files/{}", url_escape(file_id));
+        let mut body = device_body(device_id);
+        if let Some(version) = base_version {
+            body["base_version"] = json!(version);
+        }
+        self.request_empty(Method::DELETE, &path, Some(access_token), Some(body))
+            .await
+    }
+
+    pub async fn init_upload(
+        &self,
+        access_token: &str,
+        path: &str,
+        size: i64,
+        sha256: &str,
+        base_version: Option<i64>,
+        device_id: Option<&str>,
+        idempotency_key: &str,
+    ) -> Result<UploadSession> {
+        let mut body = json!({ "path": path, "size": size, "sha256": sha256 });
+        if let Some(version) = base_version {
+            body["base_version"] = json!(version);
+        }
+        if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+            body["device_id"] = json!(device_id);
+        }
+        let url = endpoint(&self.base_url, "/api/v1/uploads");
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(access_token)
+            .header("Idempotency-Key", idempotency_key)
+            .json(&body)
+            .send()
+            .await
+            .context("initialize upload")?;
+        decode_json_response(response).await
+    }
+
+    pub async fn put_upload_chunk(
+        &self,
+        access_token: &str,
+        upload_id: &str,
+        index: i32,
+        content: Vec<u8>,
+        sha256: &str,
+    ) -> Result<UploadChunk> {
+        let path = format!("/api/v1/uploads/{}/chunks/{index}", url_escape(upload_id));
+        let response = self
+            .client
+            .put(endpoint(&self.base_url, &path))
+            .bearer_auth(access_token)
+            .header("Content-Type", "application/octet-stream")
+            .header("X-Chunk-Sha256", sha256)
+            .body(content)
+            .send()
+            .await
+            .context("upload file chunk")?;
+        decode_json_response(response).await
+    }
+
+    pub async fn commit_upload(
+        &self,
+        access_token: &str,
+        upload_id: &str,
+    ) -> Result<CommitUploadData> {
+        let path = format!("/api/v1/uploads/{}/commit", url_escape(upload_id));
+        self.request_json(Method::POST, &path, Some(access_token), Some(json!({})))
+            .await
+    }
+
     pub async fn list_trash(&self, access_token: &str) -> Result<Vec<FileNode>> {
         let mut items = Vec::new();
         let mut cursor: Option<String> = None;
@@ -409,6 +487,21 @@ impl SyncHubClient {
         }
         Ok(body)
     }
+}
+
+async fn decode_json_response<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let status = response.status();
+    let envelope: ApiEnvelope<T> = response.json().await.context("decode response")?;
+    if !status.is_success() || !is_success_code(&envelope.code) {
+        return Err(anyhow!(if envelope.message.is_empty() {
+            format!("request failed with status {}", status.as_u16())
+        } else {
+            envelope.message
+        }));
+    }
+    envelope
+        .data
+        .ok_or_else(|| anyhow!("response data is empty"))
 }
 
 fn path_device_body(path: &str, device_id: Option<&str>) -> serde_json::Value {

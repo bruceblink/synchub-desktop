@@ -189,6 +189,28 @@ pub struct RestoreFileVersionData {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct UploadSession {
+    pub upload_id: String,
+    pub path: String,
+    pub chunk_size: i64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct UploadChunk {
+    pub chunk_index: i32,
+    pub size: i32,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CommitUploadData {
+    pub file_id: String,
+    pub version: i64,
+    pub change_id: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SyncConflictListData {
     pub items: Vec<SyncConflict>,
 }

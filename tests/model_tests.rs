@@ -399,10 +399,10 @@ fn conflict_resolution_labels_are_human_readable() {
 #[test]
 fn sync_command_args_include_workspace_and_config() {
     assert_eq!(
-        sync_command_args("push", "C:/work", "C:/cfg/config.json").expect("push args"),
+        sync_command_args("pull", "C:/work", "C:/cfg/config.json").expect("pull args"),
         vec![
             "sync",
-            "push",
+            "pull",
             "--path",
             "C:/work",
             "--config",
@@ -411,6 +411,7 @@ fn sync_command_args_include_workspace_and_config() {
     );
     assert!(sync_command_args("status", "C:/work", "C:/cfg/config.json").is_none());
     assert!(sync_command_args("dry-run", "C:/work", "C:/cfg/config.json").is_none());
+    assert!(sync_command_args("push", "C:/work", "C:/cfg/config.json").is_none());
 }
 
 #[test]

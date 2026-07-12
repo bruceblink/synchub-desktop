@@ -223,7 +223,7 @@ fn join_remote_path(root: &str, relative: &str) -> String {
     }
 }
 
-fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
+pub fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     let parent = path.parent().context("manifest path has no parent")?;
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let temporary = parent.join("manifest.json.tmp");
