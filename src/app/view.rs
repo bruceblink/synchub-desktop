@@ -27,7 +27,7 @@ impl SyncHubDesktop {
                 h_flex()
                     .gap_3()
                     .items_center()
-                    .child(Icon::new(IconName::Globe).text_color(colors.accent))
+                    .child(svg().path("branding/logo-mark.svg").size_6().flex_none())
                     .child(
                         Label::new("SyncHub Desktop")
                             .text_color(colors.text)

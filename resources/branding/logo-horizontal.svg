@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 256" role="img" aria-labelledby="title desc">
+  <title id="title">SyncHub</title>
+  <desc id="desc">SyncHub logo</desc>
+  <g>
+    <rect width="256" height="256" rx="56" fill="#2563EB"/>
+    <path d="M53 112a77 77 0 0 1 123-46" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round"/>
+    <path d="m169 45 35 13-27 25z" fill="#FFFFFF"/>
+    <path d="M203 144a77 77 0 0 1-123 46" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round"/>
+    <path d="m87 211-35-13 27-25z" fill="#FFFFFF"/>
+    <rect x="91" y="91" width="74" height="74" rx="20" fill="#0F766E" stroke="#FFFFFF" stroke-width="10"/>
+    <circle cx="128" cy="128" r="10" fill="#A7F3D0"/>
+  </g>
+  <text x="304" y="157" fill="#172033" font-family="Segoe UI, Arial, sans-serif" font-size="104" font-weight="700">SyncHub</text>
+</svg>
