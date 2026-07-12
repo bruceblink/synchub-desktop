@@ -1,36 +1,7 @@
 use super::CommandResult;
-use crate::models::FileNode;
-use crate::sync_commands::{
-    daemon_command_args, file_download_command_args, sync_action_label, sync_command_args,
-};
+use crate::sync_commands::{daemon_command_args, sync_action_label, sync_command_args};
 use std::path::PathBuf;
 use std::process::Command;
-pub(super) fn run_synchub_cli_file_download(
-    workspace_root: &PathBuf,
-    workspace_config: &PathBuf,
-    config_path: &PathBuf,
-    file: &FileNode,
-) -> CommandResult {
-    let root = workspace_root.display().to_string();
-    let workspace_config = workspace_config.display().to_string();
-    let config = config_path.display().to_string();
-    let Some(args) = file_download_command_args(&root, &workspace_config, &config, &file.id) else {
-        return CommandResult {
-            ok: false,
-            summary: "remote file id is required".to_string(),
-            output: String::new(),
-        };
-    };
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut result = run_command("synchub-cli", &arg_refs);
-    if result.ok {
-        result.summary = format!("downloaded remote file {}", file.path);
-    } else {
-        result.summary = format!("download failed: {}", result.summary);
-    }
-    result
-}
-
 pub(super) fn run_synchub_cli_daemon(
     action: &str,
     workspace_root: &PathBuf,

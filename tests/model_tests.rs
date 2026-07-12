@@ -14,7 +14,7 @@ use synchub_desktop::models::{
 };
 use synchub_desktop::native_manifest::scan_and_save_manifest;
 use synchub_desktop::sync_commands::{
-    daemon_command_args, file_download_command_args, parse_workspace_paths, sync_command_args,
+    daemon_command_args, parse_workspace_paths, sync_command_args,
 };
 
 #[test]
@@ -584,39 +584,6 @@ fn native_workspace_registry_manages_full_lifecycle() {
     );
 
     std::fs::remove_dir_all(root).expect("remove temp files");
-}
-
-#[test]
-fn file_download_args_use_file_id_and_json_output() {
-    assert_eq!(
-        file_download_command_args(
-            "C:/work",
-            "C:/work/.synchub/workspace.json",
-            "C:/cfg/config.json",
-            "file_1",
-        )
-        .expect("file download args"),
-        vec![
-            "file",
-            "download",
-            "--path",
-            "C:/work",
-            "--workspace-config",
-            "C:/work/.synchub/workspace.json",
-            "--config",
-            "C:/cfg/config.json",
-            "--file-id",
-            "file_1",
-            "--json",
-        ]
-    );
-}
-
-#[test]
-fn file_download_args_reject_empty_file_id() {
-    assert!(
-        file_download_command_args("C:/work", "C:/work/.synchub/workspace.json", "", "").is_none()
-    );
 }
 
 #[test]

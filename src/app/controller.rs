@@ -1,6 +1,4 @@
-use super::commands::{
-    run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_sync,
-};
+use super::commands::{run_synchub_cli_daemon, run_synchub_cli_sync};
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
 use crate::client::{SyncHubClient, normalize_base_url, refresh_cli_config_if_needed};
@@ -14,6 +12,7 @@ use crate::models::{
     compose_remote_directory_path, conflict_resolution_label, file_belongs_to_remote_root,
     file_version_label,
 };
+use crate::native_download::{local_path_for_remote, write_downloaded_file};
 use crate::native_manifest::scan_and_save_manifest;
 use crate::native_trash::{list_trash_entries, restore_trash_entry as restore_local_trash_entry};
 use crate::sync_commands::parse_workspace_paths;
@@ -864,6 +863,10 @@ impl SyncHubDesktop {
     }
 
     pub(super) fn download_remote_file(&mut self, file: FileNode, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before downloading a remote file", cx);
+            return;
+        };
         let Some(workspace) = self.current_workspace().cloned() else {
             self.set_message("select a workspace before downloading a remote file", cx);
             return;
@@ -873,31 +876,52 @@ impl SyncHubDesktop {
             return;
         }
         let workspace_root = workspace.root_path();
-        let workspace_config = workspace.workspace_config_path();
         let config_path = self.cli_config_path.clone();
+        let server = workspace.server_url(&config.server_url);
+        let remote_root = workspace.remote_path();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_file_download(
-                        &workspace_root,
-                        &workspace_config,
-                        &config_path,
-                        &file,
-                    )
-                })
-                .await
-                .unwrap_or_else(|error| CommandResult {
-                    ok: false,
-                    summary: format!("download failed: {error}"),
-                    output: String::new(),
-                });
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let target = local_path_for_remote(&workspace_root, &remote_root, &file.path)?;
+                    let content = SyncHubClient::new(server)?
+                        .download_file(&config.tokens.access_token, &file.id)
+                        .await?;
+                    let (target, bytes) = tokio::task::spawn_blocking(move || {
+                        write_downloaded_file(&target, &content).map(|bytes| (target, bytes))
+                    })
+                    .await??;
+                    Ok::<_, anyhow::Error>((config, target, bytes))
+                }
+                .await;
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
+                        match result {
+                            Ok((config, target, bytes)) => {
+                                this.cli_config = Some(config);
+                                this.message =
+                                    format!("downloaded {bytes} bytes to {}", target.display());
+                                this.command_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                            }
+                            Err(error) => {
+                                this.message = format!("download failed: {error}");
+                                this.command_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                            }
+                        }
                         if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
                             this.workspaces = workspaces;
                         }

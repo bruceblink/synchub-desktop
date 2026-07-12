@@ -95,6 +95,32 @@ impl SyncHubClient {
             .await
     }
 
+    pub async fn download_file(&self, access_token: &str, file_id: &str) -> Result<Vec<u8>> {
+        let path = format!("/api/v1/files/{}/content", url_escape(file_id));
+        let response = self
+            .client
+            .get(endpoint(&self.base_url, &path))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("download remote file")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.context("decode download error")?;
+            if let Ok(envelope) = serde_json::from_str::<ApiEnvelope<serde_json::Value>>(&body)
+                && !envelope.message.is_empty()
+            {
+                return Err(anyhow!(envelope.message));
+            }
+            return Err(anyhow!("download failed with status {}", status.as_u16()));
+        }
+        Ok(response
+            .bytes()
+            .await
+            .context("read downloaded file")?
+            .to_vec())
+    }
+
     pub async fn list_files(
         &self,
         access_token: &str,
@@ -531,6 +557,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn normalizes_base_url() {
@@ -542,6 +570,35 @@ mod tests {
             normalize_base_url("https://sync.example/"),
             "https://sync.example"
         );
+    }
+
+    #[tokio::test]
+    async fn downloads_binary_file_with_bearer_auth() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /api/v1/files/file%201/content HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer token-1")
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n\x00\x01\x02\x03")
+                .await
+                .unwrap();
+        });
+
+        let client = SyncHubClient::new(format!("http://{address}")).unwrap();
+        assert_eq!(
+            client.download_file("token-1", "file 1").await.unwrap(),
+            [0, 1, 2, 3]
+        );
+        server.await.unwrap();
     }
 
     #[test]
