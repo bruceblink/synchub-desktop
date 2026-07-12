@@ -371,7 +371,7 @@ pub fn load_workspace_snapshot(entry: WorkspaceRegistryEntry) -> WorkspaceSnapsh
     if let Ok(state) =
         read_optional_json::<SyncAgentState>(&root.join(".synchub").join("daemon-state.json"))
     {
-        snapshot.daemon_state = state;
+        snapshot.daemon_state = state.map(clear_legacy_cli_error);
     }
     if let Ok(control) =
         read_optional_json::<SyncAgentControl>(&root.join(".synchub").join("daemon-control.json"))
@@ -381,6 +381,22 @@ pub fn load_workspace_snapshot(entry: WorkspaceRegistryEntry) -> WorkspaceSnapsh
     snapshot.trash_entries = count_trash_entries(&root.join(".synchub").join("trash"));
 
     snapshot
+}
+
+fn clear_legacy_cli_error(mut state: SyncAgentState) -> SyncAgentState {
+    if state
+        .last_error
+        .to_ascii_lowercase()
+        .contains("synchub-cli")
+    {
+        state.last_error.clear();
+        state.last_failure_at = None;
+        state.consecutive_failures = 0;
+        if state.status == "error" {
+            state.status = "idle".to_string();
+        }
+    }
+    state
 }
 
 fn count_trash_entries(path: &Path) -> usize {
@@ -431,4 +447,39 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let raw = serde_json::to_vec_pretty(value)?;
     fs::write(path, [raw.as_slice(), b"\n"].concat())
         .with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_snapshot_hides_retired_cli_daemon_errors() {
+        let state = SyncAgentState {
+            status: "error".to_string(),
+            consecutive_failures: 3,
+            last_failure_at: Some("2026-07-12T00:00:00Z".to_string()),
+            last_error: "not logged in; run synchub-cli login first".to_string(),
+            ..SyncAgentState::default()
+        };
+
+        let state = clear_legacy_cli_error(state);
+
+        assert_eq!(state.status, "idle");
+        assert_eq!(state.consecutive_failures, 0);
+        assert_eq!(state.last_failure_at, None);
+        assert!(state.last_error.is_empty());
+    }
+
+    #[test]
+    fn workspace_snapshot_preserves_native_daemon_errors() {
+        let state = SyncAgentState {
+            status: "error".to_string(),
+            consecutive_failures: 1,
+            last_error: "refresh token is invalid".to_string(),
+            ..SyncAgentState::default()
+        };
+
+        assert_eq!(clear_legacy_cli_error(state.clone()), state);
+    }
 }
