@@ -76,7 +76,23 @@ impl SyncHubDesktop {
                 input.set_value(root, window, cx);
             });
         }
+        self.start_registered_workspace_daemons();
         cx.notify();
+    }
+
+    fn start_registered_workspace_daemons(&mut self) {
+        if self.cli_config.is_none() {
+            return;
+        }
+        self.daemon_tasks.retain(|_, task| !task.is_finished());
+        for workspace in &self.workspaces {
+            let root = workspace.root_path().display().to_string();
+            if self.daemon_tasks.contains_key(&root) {
+                continue;
+            }
+            let task = start_daemon(workspace.entry.clone(), self.cli_config_path.clone());
+            self.daemon_tasks.insert(root, task);
+        }
     }
 
     pub(super) fn refresh_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -259,6 +275,7 @@ impl SyncHubDesktop {
                             Ok(config) => {
                                 let email = config.user.email.clone();
                                 this.cli_config = Some(config);
+                                this.start_registered_workspace_daemons();
                                 this.message = format!("signed in as {email}");
                             }
                             Err(error) => this.message = format!("auth failed: {error}"),
@@ -301,6 +318,9 @@ impl SyncHubDesktop {
                                 this.trash_entries.clear();
                                 this.devices.clear();
                                 this.conflicts.clear();
+                                for (_, task) in this.daemon_tasks.drain() {
+                                    task.abort();
+                                }
                                 this.message = "signed out".to_string();
                             }
                             Err(error) => this.message = format!("logout failed: {error}"),

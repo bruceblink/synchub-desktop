@@ -1,12 +1,12 @@
 # SyncHub Desktop
 
-SyncHub Desktop is the native GPUI sync client for SyncHub. It talks directly to the SyncHub HTTP API and is progressively replacing the legacy CLI runtime.
+SyncHub Desktop is the native GPUI sync client for SyncHub. It talks directly to the SyncHub HTTP API and owns the complete end-user sync workflow without a CLI runtime.
 
 ## Current MVP
 
 - Login/register/logout against a SyncHub server.
 - Show server version, health, readiness component checks, metrics, OpenAPI spec, and local login profile.
-- Discover registered workspaces from the CLI registry.
+- Discover existing registered workspaces and manage the registry natively.
 - Initialize one or more workspace folders from the sidebar, optionally under a shared remote root.
 - Remove selected workspace registrations and prune stale registry entries.
 - Show workspace manifest, pending local changes, trash, daemon state, and pending remote conflicts.
@@ -20,8 +20,9 @@ SyncHub Desktop is the native GPUI sync client for SyncHub. It talks directly to
 - List local trash entries for the selected workspace and restore them.
 - List and restore cloud trash separately from local deletion-protection copies.
 - List registered sync devices and highlight the current workspace device.
-- Run common sync commands for the selected workspace: status, doctor, dry run, sync once, push, and pull.
-- Transitional CLI-backed sync, local trash, workspace registration, download, and daemon controls while those engines move into the desktop process.
+- Preview, diagnose, push, pull, or run a complete sync for the selected workspace.
+- Automatically run background sync for registered workspaces, with pause, resume, status, and state reset controls.
+- Preserve local edits as conflict copies and move remote deletions into recoverable local trash.
 
 ## Build
 
@@ -31,4 +32,4 @@ GPUI on Windows needs the native MSVC toolchain. Use Developer PowerShell for VS
 cargo run
 ```
 
-The app stores authoritative desktop preferences under the platform config directory. Legacy CLI files remain only for migration compatibility while the remaining engines move into the desktop process.
+The app stores authoritative desktop preferences under the platform config directory. Existing SyncHub config and workspace registry files are read for a lossless upgrade from older releases; no CLI executable is invoked or required.
