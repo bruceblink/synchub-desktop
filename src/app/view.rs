@@ -14,7 +14,7 @@ use gpui_component::{
     Icon, IconName, TitleBar, button::*, input::Input, label::Label, scroll::ScrollableElement, *,
 };
 impl SyncHubDesktop {
-    fn render_auth_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_auth_panel(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         let signed_in = self.cli_config.is_some();
         v_flex()
@@ -54,10 +54,17 @@ impl SyncHubDesktop {
                     }),
             )
             .child(
-                h_flex()
+                div()
+                    .flex()
+                    .when(compact, |this| this.flex_col().items_stretch())
+                    .when(!compact, |this| this.flex_row().items_center())
                     .gap_2()
-                    .items_center()
-                    .child(div().w(px(280.)).child(Input::new(&self.server_input)))
+                    .child(
+                        div()
+                            .when(compact, |this| this.w_full())
+                            .when(!compact, |this| this.w(px(280.)))
+                            .child(Input::new(&self.server_input)),
+                    )
                     .child(
                         Button::new("save-server")
                             .icon(IconName::Check)
@@ -81,11 +88,23 @@ impl SyncHubDesktop {
             )
             .when(!signed_in, |this| {
                 this.child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .when(compact, |this| this.flex_col().items_stretch())
+                        .when(!compact, |this| this.flex_row().items_center())
                         .gap_2()
-                        .items_center()
-                        .child(div().w(px(220.)).child(Input::new(&self.email_input)))
-                        .child(div().w(px(180.)).child(Input::new(&self.password_input)))
+                        .child(
+                            div()
+                                .when(compact, |this| this.w_full())
+                                .when(!compact, |this| this.w(px(220.)))
+                                .child(Input::new(&self.email_input)),
+                        )
+                        .child(
+                            div()
+                                .when(compact, |this| this.w_full())
+                                .when(!compact, |this| this.w(px(180.)))
+                                .child(Input::new(&self.password_input)),
+                        )
                         .child(
                             Button::new("login")
                                 .icon(IconName::User)
@@ -123,12 +142,20 @@ impl SyncHubDesktop {
             })
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(
+        &self,
+        compact: bool,
+        narrow: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = self.colors;
         v_flex()
-            .w(px(280.))
-            .h_full()
-            .border_r_1()
+            .when(compact, |this| this.w_full().h(px(250.)).border_b_1())
+            .when(!compact, |this| {
+                this.w(if narrow { px(240.) } else { px(280.) })
+                    .h_full()
+                    .border_r_1()
+            })
             .border_color(colors.border)
             .bg(colors.panel_alt)
             .child(
@@ -269,6 +296,8 @@ impl SyncHubDesktop {
         let colors = self.colors;
         h_flex()
             .h(px(42.))
+            .flex_none()
+            .overflow_x_scrollbar()
             .gap_1()
             .px_3()
             .items_center()
@@ -1669,8 +1698,9 @@ impl SyncHubDesktop {
 }
 
 impl Render for SyncHubDesktop {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
+        let layout = ResponsiveLayout::from_width(window.viewport_size().width.as_f32());
         v_flex()
             .size_full()
             .bg(colors.bg)
@@ -1693,19 +1723,70 @@ impl Render for SyncHubDesktop {
                         ),
                 ),
             )
-            .child(self.render_auth_panel(cx))
+            .child(self.render_auth_panel(layout.compact, cx))
             .child(
-                h_flex()
+                div()
+                    .flex()
                     .flex_1()
                     .size_full()
-                    .child(self.render_sidebar(cx))
+                    .overflow_hidden()
+                    .when(layout.compact, |this| this.flex_col())
+                    .when(!layout.compact, |this| this.flex_row())
+                    .child(self.render_sidebar(layout.compact, layout.narrow, cx))
                     .child(
                         v_flex()
                             .flex_1()
                             .size_full()
+                            .min_w_0()
+                            .min_h_0()
                             .child(self.render_tabs(cx))
                             .child(self.render_content(cx)),
                     ),
             )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResponsiveLayout {
+    compact: bool,
+    narrow: bool,
+}
+
+impl ResponsiveLayout {
+    fn from_width(width: f32) -> Self {
+        Self {
+            compact: width < 760.0,
+            narrow: width < 1040.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod responsive_tests {
+    use super::ResponsiveLayout;
+
+    #[test]
+    fn layout_breakpoints_cover_compact_narrow_and_wide_windows() {
+        assert_eq!(
+            ResponsiveLayout::from_width(640.0),
+            ResponsiveLayout {
+                compact: true,
+                narrow: true
+            }
+        );
+        assert_eq!(
+            ResponsiveLayout::from_width(900.0),
+            ResponsiveLayout {
+                compact: false,
+                narrow: true
+            }
+        );
+        assert_eq!(
+            ResponsiveLayout::from_width(1180.0),
+            ResponsiveLayout {
+                compact: false,
+                narrow: false
+            }
+        );
     }
 }

@@ -61,6 +61,7 @@ pub fn run() {
 
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+            window_min_size: Some(size(px(560.), px(520.))),
             titlebar: Some(gpui_component::TitleBar::title_bar_options()),
             ..Default::default()
         };
