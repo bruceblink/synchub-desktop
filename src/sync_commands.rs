@@ -29,62 +29,6 @@ pub fn parse_workspace_paths(input: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn workspace_init_command_args(
-    roots: &[String],
-    remote_root: &str,
-    config: &str,
-) -> Option<Vec<String>> {
-    let roots = roots
-        .iter()
-        .map(|root| root.trim())
-        .filter(|root| !root.is_empty())
-        .collect::<Vec<_>>();
-    if roots.is_empty() {
-        return None;
-    }
-
-    let mut args = vec!["workspace".to_string(), "init".to_string()];
-    for root in roots {
-        args.extend(["--path".to_string(), root.to_string()]);
-    }
-    let remote_root = remote_root.trim();
-    if !remote_root.is_empty() {
-        args.extend(["--remote-root".to_string(), remote_root.to_string()]);
-    }
-    args.extend(["--config".to_string(), config.to_string()]);
-    Some(args)
-}
-
-pub fn workspace_remove_command_args(root: &str, config: &str) -> Option<Vec<String>> {
-    let root = root.trim();
-    if root.is_empty() {
-        return None;
-    }
-
-    let mut args = vec![
-        "workspace".to_string(),
-        "remove".to_string(),
-        "--path".to_string(),
-        root.to_string(),
-    ];
-    let config = config.trim();
-    if !config.is_empty() {
-        args.extend(["--config".to_string(), config.to_string()]);
-    }
-    args.push("--json".to_string());
-    Some(args)
-}
-
-pub fn workspace_prune_command_args(config: &str) -> Vec<String> {
-    let mut args = vec!["workspace".to_string(), "prune".to_string()];
-    let config = config.trim();
-    if !config.is_empty() {
-        args.extend(["--config".to_string(), config.to_string()]);
-    }
-    args.push("--json".to_string());
-    args
-}
-
 pub fn file_download_command_args(
     root: &str,
     workspace_config: &str,

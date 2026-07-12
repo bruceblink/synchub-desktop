@@ -1,14 +1,14 @@
 use super::commands::{
     run_synchub_cli_daemon, run_synchub_cli_file_download, run_synchub_cli_sync,
-    run_synchub_cli_trash_list, run_synchub_cli_trash_restore, run_synchub_cli_workspace_init,
-    run_synchub_cli_workspace_prune, run_synchub_cli_workspace_remove,
+    run_synchub_cli_trash_list, run_synchub_cli_trash_restore,
 };
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
 use crate::client::{SyncHubClient, normalize_base_url, refresh_cli_config_if_needed};
 use crate::config::{
-    load_cli_config, load_workspace_snapshots, remove_cli_config, save_cli_config, save_settings,
-    update_cli_server_url, update_workspace_server_urls,
+    initialize_workspaces, load_cli_config, load_workspace_snapshots,
+    prune_workspace_registrations, remove_cli_config, remove_workspace_registration,
+    save_cli_config, save_settings, update_cli_server_url, update_workspace_server_urls,
 };
 use crate::models::{
     CliConfig, Device, FileListData, FileNode, FileVersion, SyncConflict, TrashEntry,
@@ -1333,29 +1333,51 @@ impl SyncHubDesktop {
             return;
         }
         let remote_root = self.remote_root_input.read(cx).value().to_string();
+        let Some(login) = self.cli_config.clone() else {
+            self.set_message("sign in before initializing a workspace", cx);
+            return;
+        };
         let config_path = self.cli_config_path.clone();
+        let registry_path = self.registry_path.clone();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let result = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_workspace_init(&roots, &remote_root, &config_path)
+                    initialize_workspaces(
+                        &roots,
+                        &remote_root,
+                        &login,
+                        &registry_path,
+                        &config_path,
+                    )
                 })
                 .await
-                .unwrap_or_else(|error| CommandResult {
-                    ok: false,
-                    summary: format!("workspace init failed: {error}"),
-                    output: String::new(),
-                });
+                .map_err(|error| anyhow::anyhow!("workspace init task failed: {error}"))
+                .and_then(|result| result);
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
-                        if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
+                        let command_result = match result {
+                            Ok(entries) => CommandResult {
+                                ok: true,
+                                summary: format!("initialized {} workspace(s)", entries.len()),
+                                output: String::new(),
+                            },
+                            Err(error) => CommandResult {
+                                ok: false,
+                                summary: format!("workspace init failed: {error}"),
+                                output: String::new(),
+                            },
+                        };
+                        this.message = command_result.summary.clone();
+                        if command_result.ok
+                            && let Ok(workspaces) = load_workspace_snapshots(&this.registry_path)
+                        {
                             this.workspaces = workspaces;
                             this.selected_workspace = this.workspaces.len().saturating_sub(1);
                         }
+                        this.command_result = Some(command_result);
                         cx.notify();
                     });
                 }
@@ -1370,28 +1392,42 @@ impl SyncHubDesktop {
             return;
         };
         let workspace_root = workspace.root_path();
-        let config_path = self.cli_config_path.clone();
+        let registry_path = self.registry_path.clone();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let result = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_workspace_remove(&workspace_root, &config_path)
+                    remove_workspace_registration(&registry_path, &workspace_root)
                 })
                 .await
-                .unwrap_or_else(|error| CommandResult {
-                    ok: false,
-                    summary: format!("workspace remove failed: {error}"),
-                    output: String::new(),
-                });
+                .map_err(|error| anyhow::anyhow!("workspace remove task failed: {error}"))
+                .and_then(|result| result);
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
-                        if result.ok {
+                        let command_result = match result {
+                            Ok(true) => CommandResult {
+                                ok: true,
+                                summary: "workspace registration removed".to_string(),
+                                output: String::new(),
+                            },
+                            Ok(false) => CommandResult {
+                                ok: false,
+                                summary: "workspace registration not found".to_string(),
+                                output: String::new(),
+                            },
+                            Err(error) => CommandResult {
+                                ok: false,
+                                summary: format!("workspace remove failed: {error}"),
+                                output: String::new(),
+                            },
+                        };
+                        this.message = command_result.summary.clone();
+                        if command_result.ok {
                             this.reload_workspace_list_after_registry_change();
                         }
+                        this.command_result = Some(command_result);
                         cx.notify();
                     });
                 }
@@ -1401,28 +1437,39 @@ impl SyncHubDesktop {
     }
 
     pub(super) fn prune_workspaces(&mut self, cx: &mut Context<Self>) {
-        let config_path = self.cli_config_path.clone();
+        let registry_path = self.registry_path.clone();
         self.set_loading(true, cx);
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
                 let result = tokio::task::spawn_blocking(move || {
-                    run_synchub_cli_workspace_prune(&config_path)
+                    prune_workspace_registrations(&registry_path)
                 })
                 .await
-                .unwrap_or_else(|error| CommandResult {
-                    ok: false,
-                    summary: format!("workspace prune failed: {error}"),
-                    output: String::new(),
-                });
+                .map_err(|error| anyhow::anyhow!("workspace prune task failed: {error}"))
+                .and_then(|result| result);
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
-                        this.command_result = Some(result.clone());
-                        this.message = result.summary.clone();
-                        if result.ok {
+                        let command_result = match result {
+                            Ok(removed) => CommandResult {
+                                ok: true,
+                                summary: format!(
+                                    "pruned {removed} stale workspace registration(s)"
+                                ),
+                                output: String::new(),
+                            },
+                            Err(error) => CommandResult {
+                                ok: false,
+                                summary: format!("workspace prune failed: {error}"),
+                                output: String::new(),
+                            },
+                        };
+                        this.message = command_result.summary.clone();
+                        if command_result.ok {
                             this.reload_workspace_list_after_registry_change();
                         }
+                        this.command_result = Some(command_result);
                         cx.notify();
                     });
                 }

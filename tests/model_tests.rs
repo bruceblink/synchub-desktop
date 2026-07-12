@@ -1,7 +1,8 @@
 use sha2::Digest;
 use synchub_desktop::client::normalize_base_url;
 use synchub_desktop::config::{
-    DesktopSettings, load_cli_config, load_settings_from_paths, load_workspace_registry,
+    DesktopSettings, initialize_workspaces, load_cli_config, load_settings_from_paths,
+    load_workspace_registry, prune_workspace_registrations, remove_workspace_registration,
     update_cli_server_url, update_workspace_server_urls, write_json,
 };
 use synchub_desktop::models::{
@@ -14,8 +15,7 @@ use synchub_desktop::models::{
 use synchub_desktop::native_manifest::scan_and_save_manifest;
 use synchub_desktop::sync_commands::{
     daemon_command_args, file_download_command_args, parse_workspace_paths, sync_command_args,
-    trash_list_command_args, trash_restore_command_args, workspace_init_command_args,
-    workspace_prune_command_args, workspace_remove_command_args,
+    trash_list_command_args, trash_restore_command_args,
 };
 
 #[test]
@@ -444,66 +444,147 @@ fn workspace_paths_are_split_for_batch_init() {
 }
 
 #[test]
-fn workspace_init_args_support_multiple_paths() {
-    let roots = vec!["C:/work/notes".to_string(), "D:/work/code".to_string()];
+fn desktop_manages_workspace_registry_without_cli() {
+    let root = std::env::temp_dir().join(format!(
+        "synchub-desktop-workspace-management-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let workspace_root = root.join("notes");
+    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+    let registry_path = root.join("workspaces.json");
+    let legacy_config_path = root.join("config.json");
+    let login = CliConfig {
+        server_url: "https://sync.likanug.app".to_string(),
+        user: synchub_desktop::models::User {
+            id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            ..Default::default()
+        },
+        ..CliConfig::default()
+    };
+
+    let initialized = initialize_workspaces(
+        &[workspace_root.display().to_string()],
+        "/documents",
+        &login,
+        &registry_path,
+        &legacy_config_path,
+    )
+    .expect("initialize workspace");
+    assert_eq!(initialized.len(), 1);
+    assert_eq!(initialized[0].remote_path, "/documents/notes");
+
+    let workspace_config: WorkspaceConfig = serde_json::from_str(
+        &std::fs::read_to_string(workspace_root.join(".synchub/workspace.json"))
+            .expect("read workspace config"),
+    )
+    .expect("decode workspace config");
+    assert_eq!(workspace_config.server_url, login.server_url);
+    assert_eq!(workspace_config.user_id, login.user.id);
 
     assert_eq!(
-        workspace_init_command_args(&roots, "/workspace", "C:/cfg/config.json")
-            .expect("workspace init args"),
-        vec![
-            "workspace",
-            "init",
-            "--path",
-            "C:/work/notes",
-            "--path",
-            "D:/work/code",
-            "--remote-root",
-            "/workspace",
-            "--config",
-            "C:/cfg/config.json",
-        ]
+        prune_workspace_registrations(&registry_path).expect("prune registry"),
+        0
     );
+    assert!(
+        remove_workspace_registration(&registry_path, &workspace_root)
+            .expect("remove registration")
+    );
+    assert!(
+        load_workspace_registry(&registry_path)
+            .expect("load registry")
+            .workspaces
+            .is_empty()
+    );
+
+    std::fs::remove_dir_all(root).expect("remove temp files");
 }
 
 #[test]
-fn workspace_init_args_reject_empty_paths() {
-    assert!(workspace_init_command_args(&[], "", "C:/cfg/config.json").is_none());
-}
+fn native_workspace_registry_manages_full_lifecycle() {
+    let root = std::env::temp_dir().join(format!(
+        "synchub-desktop-native-workspaces-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let first = root.join("alpha");
+    let second = root.join("bravo");
+    std::fs::create_dir_all(&first).expect("create first workspace");
+    std::fs::create_dir_all(&second).expect("create second workspace");
+    let registry_path = root.join("desktop-workspaces.json");
+    let legacy_config_path = root.join("legacy-config.json");
+    let login = CliConfig {
+        server_url: "https://sync.example".to_string(),
+        user: synchub_desktop::models::User {
+            id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            status: "active".to_string(),
+        },
+        ..CliConfig::default()
+    };
+    let roots = vec![first.display().to_string(), second.display().to_string()];
 
-#[test]
-fn workspace_remove_args_unregister_selected_path() {
+    let initialized = initialize_workspaces(
+        &roots,
+        "/devices",
+        &login,
+        &registry_path,
+        &legacy_config_path,
+    )
+    .expect("initialize native workspaces");
+    assert_eq!(initialized.len(), 2);
+    assert_eq!(initialized[0].remote_path, "/devices/alpha");
+    assert_eq!(initialized[1].remote_path, "/devices/bravo");
+    let first_config: WorkspaceConfig = serde_json::from_str(
+        &std::fs::read_to_string(first.join(".synchub").join("workspace.json"))
+            .expect("read first workspace config"),
+    )
+    .expect("decode first workspace config");
+    assert_eq!(first_config.server_url, login.server_url);
+    assert_eq!(first_config.user_id, login.user.id);
+    assert!(first_config.created_at.is_some());
+
+    initialize_workspaces(
+        &[first.display().to_string()],
+        "/renamed",
+        &login,
+        &registry_path,
+        &legacy_config_path,
+    )
+    .expect("replace existing registration");
+    let registry = load_workspace_registry(&registry_path).expect("load updated registry");
+    assert_eq!(registry.workspaces.len(), 2);
     assert_eq!(
-        workspace_remove_command_args("C:/work/notes", "C:/cfg/config.json")
-            .expect("workspace remove args"),
-        vec![
-            "workspace",
-            "remove",
-            "--path",
-            "C:/work/notes",
-            "--config",
-            "C:/cfg/config.json",
-            "--json",
-        ]
+        registry
+            .workspaces
+            .iter()
+            .find(|entry| {
+                std::fs::canonicalize(&entry.root).expect("resolve registered root")
+                    == std::fs::canonicalize(&first).expect("resolve first root")
+            })
+            .expect("first registration")
+            .remote_path,
+        "/renamed/alpha"
     );
-}
 
-#[test]
-fn workspace_remove_args_reject_empty_path() {
-    assert!(workspace_remove_command_args("", "C:/cfg/config.json").is_none());
-}
-
-#[test]
-fn workspace_prune_args_use_json_output() {
+    assert!(
+        remove_workspace_registration(&registry_path, &first).expect("remove first registration")
+    );
+    assert!(first.join(".synchub").join("workspace.json").is_file());
+    std::fs::remove_dir_all(&second).expect("remove second workspace directory");
     assert_eq!(
-        workspace_prune_command_args("C:/cfg/config.json"),
-        vec![
-            "workspace",
-            "prune",
-            "--config",
-            "C:/cfg/config.json",
-            "--json",
-        ]
+        prune_workspace_registrations(&registry_path).expect("prune stale registrations"),
+        1
     );
+    assert!(
+        load_workspace_registry(&registry_path)
+            .expect("load pruned registry")
+            .workspaces
+            .is_empty()
+    );
+
+    std::fs::remove_dir_all(root).expect("remove temp files");
 }
 
 #[test]

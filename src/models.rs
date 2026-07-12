@@ -96,6 +96,8 @@ pub struct WorkspaceConfig {
     pub device_name: Option<String>,
     pub device_platform: Option<String>,
     pub last_applied_change_id: Option<i64>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

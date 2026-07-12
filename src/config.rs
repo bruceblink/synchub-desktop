@@ -2,7 +2,7 @@ use crate::models::{
     CliConfig, Manifest, SyncAgentControl, SyncAgentState, WorkspaceConfig, WorkspaceRegistry,
     WorkspaceRegistryEntry, WorkspaceSnapshot, pending_manifest_changes,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fs;
@@ -131,6 +131,181 @@ pub fn load_workspace_snapshots(registry_path: &Path) -> Result<Vec<WorkspaceSna
         snapshots.push(load_workspace_snapshot(entry));
     }
     Ok(snapshots)
+}
+
+pub fn initialize_workspaces(
+    roots: &[String],
+    remote_root: &str,
+    login: &CliConfig,
+    registry_path: &Path,
+    legacy_config_path: &Path,
+) -> Result<Vec<WorkspaceRegistryEntry>> {
+    if roots.is_empty() {
+        bail!("workspace path is required");
+    }
+    if login.user.id.trim().is_empty() {
+        bail!("sign in before initializing a workspace");
+    }
+    let now = crate::app::time::rfc3339_from_system_time(std::time::SystemTime::now());
+    let mut prepared = Vec::with_capacity(roots.len());
+    for root in roots {
+        let root = clean_existing_path(Path::new(root.trim()))
+            .with_context(|| format!("resolve workspace root {root}"))?;
+        if !root.is_dir() {
+            bail!("workspace root is not a directory: {}", root.display());
+        }
+        if prepared
+            .iter()
+            .any(|(existing, _, _): &(PathBuf, String, PathBuf)| same_path(existing, &root))
+        {
+            bail!("duplicate workspace path: {}", root.display());
+        }
+        let name = root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .context("workspace root must have a directory name")?;
+        let remote_path = join_remote_root(remote_root, name);
+        if prepared
+            .iter()
+            .any(|(_, existing, _)| existing == &remote_path)
+        {
+            bail!("remote path is already used: {remote_path}");
+        }
+        let workspace_path = root.join(".synchub").join("workspace.json");
+        prepared.push((root, remote_path, workspace_path));
+    }
+
+    let mut registry = load_workspace_registry(registry_path)?;
+    registry.version = 1;
+    registry.updated_at = Some(now.clone());
+    let mut initialized = Vec::with_capacity(prepared.len());
+    for (root, remote_path, workspace_path) in prepared {
+        let workspace = WorkspaceConfig {
+            version: 1,
+            root: root.display().to_string(),
+            remote_path: remote_path.clone(),
+            server_url: login.server_url.clone(),
+            user_id: login.user.id.clone(),
+            user_email: login.user.email.clone(),
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            ..WorkspaceConfig::default()
+        };
+        write_json(&workspace_path, &workspace)?;
+        let entry = WorkspaceRegistryEntry {
+            root: workspace.root.clone(),
+            workspace_config_path: workspace_path.display().to_string(),
+            config_path: legacy_config_path.display().to_string(),
+            remote_path,
+            server_url: login.server_url.clone(),
+            user_id: login.user.id.clone(),
+            user_email: login.user.email.clone(),
+            updated_at: Some(now.clone()),
+        };
+        registry.workspaces.retain(|existing| {
+            !same_path(Path::new(&existing.root), Path::new(&entry.root))
+                && !same_path(
+                    Path::new(&existing.workspace_config_path),
+                    Path::new(&entry.workspace_config_path),
+                )
+        });
+        registry.workspaces.push(entry.clone());
+        initialized.push(entry);
+    }
+    registry
+        .workspaces
+        .sort_by(|left, right| left.root.cmp(&right.root));
+    write_json(registry_path, &registry)?;
+    Ok(initialized)
+}
+
+pub fn remove_workspace_registration(registry_path: &Path, root: &Path) -> Result<bool> {
+    let mut registry = load_workspace_registry(registry_path)?;
+    let before = registry.workspaces.len();
+    registry
+        .workspaces
+        .retain(|entry| !same_path(Path::new(&entry.root), root));
+    if registry.workspaces.len() == before {
+        return Ok(false);
+    }
+    registry.updated_at = Some(crate::app::time::rfc3339_from_system_time(
+        std::time::SystemTime::now(),
+    ));
+    write_json(registry_path, &registry)?;
+    Ok(true)
+}
+
+pub fn prune_workspace_registrations(registry_path: &Path) -> Result<usize> {
+    let mut registry = load_workspace_registry(registry_path)?;
+    let before = registry.workspaces.len();
+    registry.workspaces.retain(|entry| {
+        Path::new(&entry.root).is_dir() && Path::new(&entry.workspace_config_path).is_file()
+    });
+    let removed = before - registry.workspaces.len();
+    if removed > 0 {
+        registry.updated_at = Some(crate::app::time::rfc3339_from_system_time(
+            std::time::SystemTime::now(),
+        ));
+        write_json(registry_path, &registry)?;
+    }
+    Ok(removed)
+}
+
+fn join_remote_root(remote_root: &str, name: &str) -> String {
+    let root = normalize_remote_path(remote_root);
+    if root == "/" {
+        format!("/{name}")
+    } else {
+        format!("{root}/{name}")
+    }
+}
+
+fn normalize_remote_path(value: &str) -> String {
+    let mut parts = Vec::new();
+    let normalized = value.trim().replace('\\', "/");
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part.to_string()),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = comparable_path(left);
+    let right = comparable_path(right);
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn clean_existing_path(path: &Path) -> Result<PathBuf> {
+    Ok(strip_windows_verbatim(fs::canonicalize(path)?))
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path)
+        .map(strip_windows_verbatim)
+        .unwrap_or_else(|_| strip_windows_verbatim(path.to_path_buf()))
+}
+
+fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+    if !cfg!(windows) {
+        return path;
+    }
+    let value = path.to_string_lossy();
+    value
+        .strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or(path)
 }
 
 pub fn update_workspace_server_urls(registry_path: &Path, server_url: &str) -> Result<usize> {
