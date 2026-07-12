@@ -399,34 +399,18 @@ fn conflict_resolution_labels_are_human_readable() {
 #[test]
 fn sync_command_args_include_workspace_and_config() {
     assert_eq!(
-        sync_command_args("dry-run", "C:/work", "C:/cfg/config.json").expect("dry-run args"),
+        sync_command_args("push", "C:/work", "C:/cfg/config.json").expect("push args"),
         vec![
             "sync",
-            "once",
-            "--dry-run",
+            "push",
             "--path",
             "C:/work",
             "--config",
             "C:/cfg/config.json",
         ]
     );
-}
-
-#[test]
-fn status_sync_command_includes_remote_context() {
-    assert_eq!(
-        sync_command_args("status", "C:/work", "C:/cfg/config.json").expect("status args"),
-        vec![
-            "sync",
-            "status",
-            "--show-remote",
-            "--show-conflicts",
-            "--path",
-            "C:/work",
-            "--config",
-            "C:/cfg/config.json",
-        ]
-    );
+    assert!(sync_command_args("status", "C:/work", "C:/cfg/config.json").is_none());
+    assert!(sync_command_args("dry-run", "C:/work", "C:/cfg/config.json").is_none());
 }
 
 #[test]

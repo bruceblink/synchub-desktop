@@ -14,6 +14,7 @@ use crate::models::{
 };
 use crate::native_download::{local_path_for_remote, write_downloaded_file};
 use crate::native_manifest::scan_and_save_manifest;
+use crate::native_sync::build_sync_plan;
 use crate::native_trash::{list_trash_entries, restore_trash_entry as restore_local_trash_entry};
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
@@ -1291,6 +1292,10 @@ impl SyncHubDesktop {
     }
 
     pub(super) fn run_sync_command(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        if matches!(action, "status" | "dry-run") {
+            self.run_native_sync_preview(action, cx);
+            return;
+        }
         let workspace_root = self
             .current_workspace()
             .map(|workspace| workspace.root_path())
@@ -1316,6 +1321,53 @@ impl SyncHubDesktop {
                         this.message = result.summary.clone();
                         if let Ok(workspaces) = load_workspace_snapshots(&this.registry_path) {
                             this.workspaces = workspaces;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn run_native_sync_preview(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before checking sync status", cx);
+            return;
+        };
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = tokio::task::spawn_blocking(move || build_sync_plan(&workspace))
+                    .await
+                    .map_err(|error| anyhow::anyhow!("sync preview task failed: {error}"))
+                    .and_then(|result| result);
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((_, plan)) => {
+                                let prefix = if action == "dry-run" {
+                                    "Dry run"
+                                } else {
+                                    "Sync status"
+                                };
+                                this.message = format!("{prefix}: {}", plan.summary());
+                                this.command_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: this.message.clone(),
+                                    output: plan.display(),
+                                });
+                            }
+                            Err(error) => {
+                                this.message = format!("sync preview failed: {error}");
+                                this.command_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                            }
                         }
                         cx.notify();
                     });

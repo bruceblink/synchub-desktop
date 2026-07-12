@@ -16,6 +16,15 @@ struct IgnoreRule {
 }
 
 pub fn scan_and_save_manifest(workspace: &WorkspaceSnapshot) -> Result<Manifest> {
+    let manifest = scan_current_manifest(workspace)?;
+    write_manifest(
+        &workspace.root_path().join(".synchub").join("manifest.json"),
+        &manifest,
+    )?;
+    Ok(manifest)
+}
+
+pub fn scan_current_manifest(workspace: &WorkspaceSnapshot) -> Result<Manifest> {
     let root = workspace.root_path();
     if root.as_os_str().is_empty() || !root.is_dir() {
         bail!("workspace root is not a directory: {}", root.display());
@@ -37,7 +46,6 @@ pub fn scan_and_save_manifest(workspace: &WorkspaceSnapshot) -> Result<Manifest>
         generated_at: Some(crate::app::time::rfc3339_from_system_time(SystemTime::now())),
         items,
     };
-    write_manifest(&root.join(".synchub").join("manifest.json"), &manifest)?;
     Ok(manifest)
 }
 
