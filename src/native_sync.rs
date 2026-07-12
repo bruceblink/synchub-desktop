@@ -674,17 +674,8 @@ async fn upload_manifest_entry(
         item.sha256,
         base_version.unwrap_or(0)
     );
-    let session = client
-        .init_upload(
-            access_token,
-            &item.path,
-            item.size,
-            &item.sha256,
-            base_version,
-            device_id,
-            &key,
-        )
-        .await?;
+    let session =
+        init_active_upload(client, access_token, item, base_version, device_id, &key).await?;
     if session.chunk_size <= 0 {
         bail!("server returned invalid upload chunk size");
     }
@@ -715,6 +706,60 @@ async fn upload_manifest_entry(
         .commit_upload(access_token, &session.upload_id)
         .await?
         .version)
+}
+
+async fn init_active_upload(
+    client: &SyncHubClient,
+    access_token: &str,
+    item: &ManifestEntry,
+    base_version: Option<i64>,
+    device_id: Option<&str>,
+    idempotency_key: &str,
+) -> Result<crate::models::UploadSession> {
+    let mut session = client
+        .init_upload(
+            access_token,
+            &item.path,
+            item.size,
+            &item.sha256,
+            base_version,
+            device_id,
+            idempotency_key,
+        )
+        .await?;
+    if upload_session_is_active(&session.status) {
+        return Ok(session);
+    }
+    let retry_key = format!(
+        "{idempotency_key}:retry:{}:{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    session = client
+        .init_upload(
+            access_token,
+            &item.path,
+            item.size,
+            &item.sha256,
+            base_version,
+            device_id,
+            &retry_key,
+        )
+        .await?;
+    if !upload_session_is_active(&session.status) {
+        bail!(
+            "server returned inactive upload session: {}",
+            session.status
+        );
+    }
+    Ok(session)
+}
+
+fn upload_session_is_active(status: &str) -> bool {
+    status.trim().is_empty() || status.eq_ignore_ascii_case("pending")
 }
 
 async fn ensure_remote_directories(
@@ -917,6 +962,68 @@ mod tests {
                 "POST /api/v1/uploads/upl_1/commit",
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_retries_when_idempotency_returns_completed_upload() {
+        let root = test_root("push-completed-upload");
+        let workspace = new_workspace(&root);
+        fs::create_dir_all(root.join(".synchub")).unwrap();
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..6 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_request(&mut stream).await;
+                let request_line = request.lines().next().unwrap().to_string();
+                requests.push(request_line.clone());
+                let body = match index {
+                    0 => r#"{"code":"NOT_FOUND","message":"not found"}"#,
+                    1 => {
+                        r#"{"code":0,"message":"ok","data":{"id":"dir_1","name":"workspace","path":"/workspace","node_type":"directory","size":0,"version":1}}"#
+                    }
+                    2 => {
+                        r#"{"code":0,"message":"ok","data":{"upload_id":"old","path":"/workspace/a.txt","chunk_size":8,"status":"committed"}}"#
+                    }
+                    3 => {
+                        r#"{"code":0,"message":"ok","data":{"upload_id":"fresh","path":"/workspace/a.txt","chunk_size":8,"status":"pending"}}"#
+                    }
+                    4 => {
+                        r#"{"code":0,"message":"ok","data":{"chunk_index":0,"size":5,"sha256":"hash"}}"#
+                    }
+                    5 => {
+                        r#"{"code":0,"message":"ok","data":{"file_id":"file_1","version":7,"change_id":9}}"#
+                    }
+                    _ => unreachable!(),
+                };
+                let status = if index == 0 {
+                    404
+                } else if index == 1 || index == 2 || index == 3 {
+                    201
+                } else {
+                    200
+                };
+                write_json_response(&mut stream, status, body).await;
+            }
+            requests
+        });
+
+        execute_push(
+            &SyncHubClient::new(format!("http://{address}")).unwrap(),
+            "token",
+            &workspace,
+        )
+        .await
+        .unwrap();
+
+        let requests = requests.await.unwrap();
+        assert!(requests[2].starts_with("POST /api/v1/uploads"));
+        assert!(requests[3].starts_with("POST /api/v1/uploads"));
+        assert!(requests[4].starts_with("PUT /api/v1/uploads/fresh/chunks/0"));
+        assert!(requests[5].starts_with("POST /api/v1/uploads/fresh/commit"));
         fs::remove_dir_all(root).unwrap();
     }
 
