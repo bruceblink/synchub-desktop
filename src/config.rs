@@ -98,6 +98,10 @@ pub fn save_cli_config(config_path: &Path, config: &CliConfig) -> Result<()> {
     write_json(config_path, config)
 }
 
+pub fn save_workspace_config(path: &Path, config: &WorkspaceConfig) -> Result<()> {
+    write_json(path, config)
+}
+
 pub fn update_cli_server_url(config_path: &Path, server_url: &str) -> Result<Option<CliConfig>> {
     let Some(mut config) = load_cli_config(config_path)? else {
         return Ok(None);

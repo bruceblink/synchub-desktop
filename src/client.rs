@@ -1,7 +1,8 @@
 use crate::models::{
-    ApiEnvelope, ApiStatus, CliConfig, CommitUploadData, DeviceListData, FileListData, FileNode,
-    FileVersion, FileVersionListData, LoginData, RestoreFileVersionData, SyncConflict,
-    SyncConflictListData, TokenPair, UploadChunk, UploadSession, VersionInfo, is_success_code,
+    ApiEnvelope, ApiStatus, ChangeListData, CliConfig, CommitUploadData, Device, DeviceListData,
+    FileListData, FileNode, FileVersion, FileVersionListData, LoginData, RestoreFileVersionData,
+    SyncConflict, SyncConflictListData, TokenPair, UploadChunk, UploadSession, VersionInfo,
+    is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -398,6 +399,40 @@ impl SyncHubClient {
         let path = format!("/api/v1/devices?limit={}", limit);
         self.request_json(Method::GET, &path, Some(access_token), None)
             .await
+    }
+
+    pub async fn list_changes(
+        &self,
+        access_token: &str,
+        device_id: &str,
+        after_change_id: i64,
+        limit: u32,
+    ) -> Result<ChangeListData> {
+        let path = format!(
+            "/api/v1/sync/changes?device_id={}&after_change_id={after_change_id}&limit={}",
+            url_escape(device_id),
+            limit.clamp(1, 500)
+        );
+        self.request_json(Method::GET, &path, Some(access_token), None)
+            .await
+    }
+
+    pub async fn ack_changes(
+        &self,
+        access_token: &str,
+        device_id: &str,
+        last_applied_change_id: i64,
+    ) -> Result<Device> {
+        self.request_json(
+            Method::POST,
+            "/api/v1/sync/ack",
+            Some(access_token),
+            Some(json!({
+                "device_id": device_id,
+                "last_applied_change_id": last_applied_change_id,
+            })),
+        )
+        .await
     }
 
     pub async fn resolve_conflict(

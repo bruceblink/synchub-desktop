@@ -1,10 +1,14 @@
 use crate::client::SyncHubClient;
-use crate::models::{Manifest, ManifestEntry, WorkspaceSnapshot};
+use crate::config::save_workspace_config;
+use crate::models::{ChangeEvent, Manifest, ManifestEntry, WorkspaceSnapshot};
 use crate::native_manifest::{scan_current_manifest, write_manifest};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +90,394 @@ pub fn build_sync_plan(workspace: &WorkspaceSnapshot) -> Result<(Manifest, SyncP
 pub struct PushResult {
     pub uploaded: usize,
     pub deleted: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PullResult {
+    pub files: usize,
+    pub directories: usize,
+    pub deleted: usize,
+    pub moved: usize,
+    pub conflicts: usize,
+    pub trashed: usize,
+    pub cursor: i64,
+}
+
+impl PullResult {
+    pub fn summary(&self) -> String {
+        format!(
+            "pulled {} file(s), {} folder(s), {} deleted, {} moved, {} conflict(s)",
+            self.files, self.directories, self.deleted, self.moved, self.conflicts
+        )
+    }
+}
+
+pub async fn execute_pull(
+    client: &SyncHubClient,
+    access_token: &str,
+    workspace: &WorkspaceSnapshot,
+) -> Result<PullResult> {
+    let mut config = workspace
+        .config
+        .clone()
+        .context("workspace configuration is missing")?;
+    let device_id = config
+        .device_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .context("workspace device is not registered")?;
+    let current_cursor = config.last_applied_change_id.unwrap_or_default();
+    let changes = client
+        .list_changes(access_token, device_id, current_cursor, 500)
+        .await?;
+    let previous = workspace.manifest.clone().unwrap_or_default();
+    let previous_by_remote = previous
+        .items
+        .iter()
+        .map(|entry| (normalize_remote_path(&entry.path), entry))
+        .collect::<HashMap<_, _>>();
+    let root = workspace.root_path();
+    let remote_root = normalize_remote_path(&workspace.remote_path());
+    let mut result = PullResult::default();
+
+    for event in &changes.items {
+        if event.source_device_id.as_deref() == Some(device_id) {
+            continue;
+        }
+        apply_change(
+            client,
+            access_token,
+            &root,
+            &remote_root,
+            event,
+            &previous_by_remote,
+            &mut result,
+        )
+        .await?;
+    }
+
+    if !changes.items.is_empty() {
+        let mut manifest = scan_current_manifest(workspace)?;
+        merge_remote_versions(&mut manifest, &previous, &changes.items);
+        write_manifest(&root.join(".synchub").join("manifest.json"), &manifest)?;
+    }
+
+    let next_cursor = if changes.next_cursor > 0 {
+        changes.next_cursor
+    } else {
+        changes
+            .items
+            .last()
+            .map(|event| event.id)
+            .unwrap_or(current_cursor)
+    };
+    if next_cursor > current_cursor {
+        let device = client
+            .ack_changes(access_token, device_id, next_cursor)
+            .await?;
+        config.last_applied_change_id = Some(device.last_applied_change_id.max(next_cursor));
+        config.updated_at = Some(crate::app::time::rfc3339_from_system_time(SystemTime::now()));
+        save_workspace_config(&workspace.workspace_config_path(), &config)?;
+    }
+    result.cursor = config.last_applied_change_id.unwrap_or(current_cursor);
+    Ok(result)
+}
+
+async fn apply_change(
+    client: &SyncHubClient,
+    access_token: &str,
+    root: &Path,
+    remote_root: &str,
+    event: &ChangeEvent,
+    previous: &HashMap<String, &ManifestEntry>,
+    result: &mut PullResult,
+) -> Result<()> {
+    let Some(local_path) = local_path_for_remote(root, remote_root, &event.path)? else {
+        return Ok(());
+    };
+    match event.event_type.as_str() {
+        "create" | "update" | "restore" if event.version.is_none() => {
+            fs::create_dir_all(&local_path)
+                .with_context(|| format!("create {}", local_path.display()))?;
+            result.directories += 1;
+        }
+        "create" | "update" | "restore" => {
+            if keep_changed_path_as_conflict(&local_path, &event.path, previous)? {
+                result.conflicts += 1;
+            }
+            let content = client.download_file(access_token, &event.file_id).await?;
+            write_download_atomically(&local_path, &content)?;
+            result.files += 1;
+        }
+        "delete" => {
+            if keep_changed_path_as_conflict(&local_path, &event.path, previous)? {
+                result.conflicts += 1;
+            } else if move_to_local_trash(root, &local_path)?.is_some() {
+                result.trashed += 1;
+            }
+            result.deleted += 1;
+        }
+        "move" => {
+            let old_path = event
+                .old_path
+                .as_deref()
+                .context("move event is missing old_path")?;
+            let Some(old_local) = local_path_for_remote(root, remote_root, old_path)? else {
+                return Ok(());
+            };
+            if keep_changed_path_as_conflict(&old_local, old_path, previous)? {
+                result.conflicts += 1;
+                if event.version.is_some() {
+                    let content = client.download_file(access_token, &event.file_id).await?;
+                    write_download_atomically(&local_path, &content)?;
+                }
+            } else if old_local.exists() {
+                if local_path.exists() {
+                    bail!("move target already exists: {}", local_path.display());
+                }
+                if let Some(parent) = local_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::rename(&old_local, &local_path).with_context(|| {
+                    format!("move {} to {}", old_local.display(), local_path.display())
+                })?;
+            }
+            result.moved += 1;
+        }
+        kind => bail!("unsupported change event type: {kind}"),
+    }
+    Ok(())
+}
+
+fn local_path_for_remote(
+    root: &Path,
+    remote_root: &str,
+    remote_path: &str,
+) -> Result<Option<PathBuf>> {
+    if remote_path
+        .replace('\\', "/")
+        .split('/')
+        .any(|part| part == "..")
+    {
+        bail!("remote path escapes workspace: {remote_path}");
+    }
+    let remote_path = normalize_remote_path(remote_path);
+    let relative = if remote_root == "/" {
+        remote_path.trim_start_matches('/').to_string()
+    } else if remote_path == remote_root {
+        String::new()
+    } else if let Some(relative) = remote_path.strip_prefix(&format!("{remote_root}/")) {
+        relative.to_string()
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(root.join(
+        relative.replace('/', std::path::MAIN_SEPARATOR_STR),
+    )))
+}
+
+fn normalize_remote_path(path: &str) -> String {
+    let parts = path
+        .trim()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    format!("/{}", parts.join("/"))
+}
+
+fn keep_changed_file_as_conflict(
+    local_path: &Path,
+    remote_path: &str,
+    previous: &HashMap<String, &ManifestEntry>,
+) -> Result<bool> {
+    let Some(entry) = previous.get(&normalize_remote_path(remote_path)) else {
+        return Ok(false);
+    };
+    if !local_path.is_file() || entry.sha256.is_empty() {
+        return Ok(false);
+    }
+    let current = fs::read(local_path).with_context(|| format!("read {}", local_path.display()))?;
+    if format!("{:x}", Sha256::digest(current)) == entry.sha256 {
+        return Ok(false);
+    }
+    let conflict = conflict_path(local_path);
+    fs::rename(local_path, &conflict)
+        .with_context(|| format!("preserve conflict as {}", conflict.display()))?;
+    Ok(true)
+}
+
+fn keep_changed_path_as_conflict(
+    local_path: &Path,
+    remote_path: &str,
+    previous: &HashMap<String, &ManifestEntry>,
+) -> Result<bool> {
+    if local_path.is_file() {
+        return keep_changed_file_as_conflict(local_path, remote_path, previous);
+    }
+    if !local_path.is_dir() || !directory_has_local_changes(local_path, remote_path, previous)? {
+        return Ok(false);
+    }
+    let conflict = conflict_path(local_path);
+    fs::rename(local_path, &conflict)
+        .with_context(|| format!("preserve conflict as {}", conflict.display()))?;
+    Ok(true)
+}
+
+fn directory_has_local_changes(
+    directory: &Path,
+    remote_path: &str,
+    previous: &HashMap<String, &ManifestEntry>,
+) -> Result<bool> {
+    let remote_path = normalize_remote_path(remote_path);
+    let tracked = previous
+        .iter()
+        .filter(|(path, _)| path.starts_with(&format!("{remote_path}/")))
+        .map(|(path, entry)| (path.clone(), *entry))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in fs::read_dir(&current)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !path.is_file() {
+                return Ok(true);
+            }
+            let relative = path
+                .strip_prefix(directory)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let item_path = format!("{remote_path}/{relative}");
+            let Some(old) = tracked.get(&item_path) else {
+                return Ok(true);
+            };
+            let content = fs::read(&path)?;
+            if format!("{:x}", Sha256::digest(content)) != old.sha256 {
+                return Ok(true);
+            }
+            seen.insert(item_path);
+        }
+    }
+    Ok(seen.len() != tracked.len())
+}
+
+fn conflict_path(path: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let name = extension
+        .map(|extension| format!("{stem}.conflict-{timestamp}.{extension}"))
+        .unwrap_or_else(|| format!("{stem}.conflict-{timestamp}"));
+    path.with_file_name(name)
+}
+
+fn move_to_local_trash(root: &Path, path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let relative = path
+        .strip_prefix(root)
+        .context("local path escapes workspace")?;
+    if relative.starts_with(".synchub") || relative.as_os_str().is_empty() {
+        bail!("refusing to trash protected workspace path");
+    }
+    let batch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string();
+    let target = root
+        .join(".synchub")
+        .join("trash")
+        .join(batch)
+        .join(relative);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(path, &target)?;
+    Ok(Some(target))
+}
+
+fn write_download_atomically(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path.parent().context("download target has no parent")?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".synchub-pull-")
+        .tempfile_in(parent)?;
+    temporary.write_all(content)?;
+    temporary.as_file_mut().sync_all()?;
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn merge_remote_versions(current: &mut Manifest, previous: &Manifest, changes: &[ChangeEvent]) {
+    let mut versions = previous
+        .items
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .remote_version
+                .map(|version| (normalize_remote_path(&entry.path), version))
+        })
+        .collect::<HashMap<_, _>>();
+    for event in changes {
+        let path = normalize_remote_path(&event.path);
+        match event.event_type.as_str() {
+            "create" | "update" | "restore" => {
+                if let Some(version) = event.version {
+                    versions.insert(path, version);
+                }
+            }
+            "delete" => {
+                versions.retain(|item, _| item != &path && !item.starts_with(&format!("{path}/")))
+            }
+            "move" => {
+                if let Some(old_path) = &event.old_path {
+                    let old_path = normalize_remote_path(old_path);
+                    let moved = versions
+                        .iter()
+                        .filter_map(|(item, version)| {
+                            (item == &old_path || item.starts_with(&format!("{old_path}/"))).then(
+                                || {
+                                    (
+                                        item.clone(),
+                                        format!("{path}{}", &item[old_path.len()..]),
+                                        *version,
+                                    )
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    for (old, new, version) in moved {
+                        versions.remove(&old);
+                        versions.insert(new, version);
+                    }
+                }
+                if let Some(version) = event.version {
+                    versions.insert(path, version);
+                }
+            }
+            _ => {}
+        }
+    }
+    for entry in &mut current.items {
+        entry.remote_version = versions.get(&normalize_remote_path(&entry.path)).copied();
+    }
 }
 
 impl PushResult {
@@ -494,6 +886,82 @@ mod tests {
         assert!(manifest.items.is_empty());
         server.await.unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn maps_only_remote_paths_inside_workspace() {
+        let root = Path::new("workspace");
+        assert_eq!(
+            local_path_for_remote(root, "/notes", "/notes/docs/readme.md").unwrap(),
+            Some(root.join("docs").join("readme.md"))
+        );
+        assert_eq!(
+            local_path_for_remote(root, "/notes", "/other/readme.md").unwrap(),
+            None
+        );
+        assert!(local_path_for_remote(root, "/notes", "/notes/../outside").is_err());
+    }
+
+    #[test]
+    fn detects_changes_anywhere_in_tracked_directory() {
+        let root = test_root("pull-directory-conflict");
+        let directory = root.join("docs");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("readme.md"), b"local edit").unwrap();
+        let old = ManifestEntry {
+            path: "/workspace/docs/readme.md".into(),
+            relative_path: "docs/readme.md".into(),
+            sha256: format!("{:x}", Sha256::digest(b"remote baseline")),
+            ..Default::default()
+        };
+        let previous = HashMap::from([(old.path.clone(), &old)]);
+
+        assert!(directory_has_local_changes(&directory, "/workspace/docs", &previous).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn merges_versions_across_remote_move_and_delete() {
+        let mut current = Manifest {
+            items: vec![ManifestEntry {
+                path: "/workspace/new/a.txt".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let previous = Manifest {
+            items: vec![
+                ManifestEntry {
+                    path: "/workspace/old/a.txt".into(),
+                    remote_version: Some(3),
+                    ..Default::default()
+                },
+                ManifestEntry {
+                    path: "/workspace/deleted.txt".into(),
+                    remote_version: Some(2),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        merge_remote_versions(
+            &mut current,
+            &previous,
+            &[
+                ChangeEvent {
+                    event_type: "move".into(),
+                    old_path: Some("/workspace/old".into()),
+                    path: "/workspace/new".into(),
+                    ..Default::default()
+                },
+                ChangeEvent {
+                    event_type: "delete".into(),
+                    path: "/workspace/deleted.txt".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert_eq!(current.items[0].remote_version, Some(3));
     }
 
     fn test_root(name: &str) -> PathBuf {

@@ -14,7 +14,7 @@ use crate::models::{
 };
 use crate::native_download::{local_path_for_remote, write_downloaded_file};
 use crate::native_manifest::scan_and_save_manifest;
-use crate::native_sync::{build_sync_plan, execute_push};
+use crate::native_sync::{build_sync_plan, execute_pull, execute_push};
 use crate::native_trash::{list_trash_entries, restore_trash_entry as restore_local_trash_entry};
 use crate::sync_commands::parse_workspace_paths;
 use gpui::*;
@@ -1300,6 +1300,10 @@ impl SyncHubDesktop {
             self.run_native_push(cx);
             return;
         }
+        if action == "pull" {
+            self.run_native_pull(cx);
+            return;
+        }
         let workspace_root = self
             .current_workspace()
             .map(|workspace| workspace.root_path())
@@ -1380,6 +1384,70 @@ impl SyncHubDesktop {
                             }
                             Err(error) => {
                                 this.message = format!("push failed: {error:#}");
+                                this.command_result = Some(CommandResult {
+                                    ok: false,
+                                    summary: this.message.clone(),
+                                    output: String::new(),
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn run_native_pull(&mut self, cx: &mut Context<Self>) {
+        let Some(mut config) = self.cli_config.clone() else {
+            self.set_message("sign in before pulling remote changes", cx);
+            return;
+        };
+        let Some(workspace) = self.current_workspace().cloned() else {
+            self.set_message("select a workspace before pulling remote changes", cx);
+            return;
+        };
+        let config_path = self.cli_config_path.clone();
+        let server = workspace.server_url(&config.server_url);
+        self.set_loading(true, cx);
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = async {
+                    let changed = refresh_cli_config_if_needed(&mut config).await?;
+                    if changed {
+                        save_cli_config(&config_path, &config)?;
+                    }
+                    let client = SyncHubClient::new(server)?;
+                    let pulled =
+                        execute_pull(&client, &config.tokens.access_token, &workspace).await?;
+                    Ok::<_, anyhow::Error>((config, pulled))
+                }
+                .await;
+                if let Some(this) = this.upgrade() {
+                    let _ = this.update(&mut cx, |this, cx| {
+                        this.loading = false;
+                        match result {
+                            Ok((config, pulled)) => {
+                                this.cli_config = Some(config);
+                                this.message = pulled.summary();
+                                this.command_result = Some(CommandResult {
+                                    ok: true,
+                                    summary: this.message.clone(),
+                                    output: format!(
+                                        "cursor: {}\ntrashed: {}",
+                                        pulled.cursor, pulled.trashed
+                                    ),
+                                });
+                                if let Ok(workspaces) =
+                                    load_workspace_snapshots(&this.registry_path)
+                                {
+                                    this.workspaces = workspaces;
+                                }
+                            }
+                            Err(error) => {
+                                this.message = format!("pull failed: {error:#}");
                                 this.command_result = Some(CommandResult {
                                     ok: false,
                                     summary: this.message.clone(),

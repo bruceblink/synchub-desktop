@@ -232,6 +232,24 @@ pub struct Device {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ChangeEvent {
+    pub id: i64,
+    pub file_id: String,
+    pub event_type: String,
+    pub version: Option<i64>,
+    pub path: String,
+    pub old_path: Option<String>,
+    pub source_device_id: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ChangeListData {
+    pub items: Vec<ChangeEvent>,
+    pub next_cursor: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SyncConflict {
     pub id: String,
     pub file_id: Option<String>,
