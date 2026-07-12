@@ -1,6 +1,6 @@
 use super::time::rfc3339_from_system_time;
 use super::{AuthMode, CommandResult, SyncHubDesktop};
-use crate::client::{SyncHubClient, normalize_base_url, refresh_cli_config_if_needed};
+use crate::client::{SyncHubClient, normalize_base_url, refresh_cli_config_from_disk};
 use crate::config::{
     initialize_workspaces, load_cli_config, load_workspace_snapshots,
     prune_workspace_registrations, remove_cli_config, remove_workspace_registration,
@@ -356,10 +356,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let server = workspace
                         .as_ref()
                         .map(|workspace| workspace.server_url(&config.server_url))
@@ -442,10 +439,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let server = workspace.server_url(&config.server_url);
                     let client = SyncHubClient::new(server)?;
                     let node = client
@@ -526,10 +520,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let data = client
                         .list_file_versions(&config.tokens.access_token, &file.id, 100)
@@ -586,10 +577,7 @@ impl SyncHubDesktop {
             async move {
                 let result =
                     async {
-                        let changed = refresh_cli_config_if_needed(&mut config).await?;
-                        if changed {
-                            save_cli_config(&config_path, &config)?;
-                        }
+                        refresh_cli_config_from_disk(&config_path, &mut config).await?;
                         let server = workspace.server_url(&config.server_url);
                         let client = SyncHubClient::new(server)?;
                         let restored = client
@@ -668,10 +656,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let updated = if pinned {
                         client
@@ -741,10 +726,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let server = workspace.server_url(&config.server_url);
                     let client = SyncHubClient::new(server)?;
                     client
@@ -822,10 +804,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let server = workspace.server_url(&config.server_url);
                     let client = SyncHubClient::new(server)?;
                     let moved = client
@@ -905,10 +884,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let target = local_path_for_remote(&workspace_root, &remote_root, &file.path)?;
                     let content = SyncHubClient::new(server)?
                         .download_file(&config.tokens.access_token, &file.id)
@@ -1019,10 +995,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let trash = client
                         .list_trash(&config.tokens.access_token)
@@ -1073,10 +1046,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let restored = client
                         .restore_trash(
@@ -1177,10 +1147,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(&config.server_url)?;
                     let data = client
                         .list_conflicts(&config.tokens.access_token, 100)
@@ -1222,10 +1189,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let data = client
                         .list_devices(&config.tokens.access_token, 100)
@@ -1268,10 +1232,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(&config.server_url)?;
                     let resolved = client
                         .resolve_conflict(&config.tokens.access_token, &conflict_id, resolution)
@@ -1351,10 +1312,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let report = run_doctor(&client, &config, &workspace).await?;
                     Ok::<_, anyhow::Error>((config, report))
@@ -1406,10 +1364,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let pushed =
                         execute_push(&client, &config.tokens.access_token, &workspace).await?;
@@ -1467,10 +1422,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let pulled =
                         execute_pull(&client, &config.tokens.access_token, &workspace).await?;
@@ -1531,10 +1483,7 @@ impl SyncHubDesktop {
             let mut cx = cx.clone();
             async move {
                 let result = async {
-                    let changed = refresh_cli_config_if_needed(&mut config).await?;
-                    if changed {
-                        save_cli_config(&config_path, &config)?;
-                    }
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let synced =
                         execute_sync_once(&client, &config.tokens.access_token, &workspace).await?;

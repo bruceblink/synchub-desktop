@@ -1,7 +1,5 @@
-use crate::client::{SyncHubClient, refresh_cli_config_if_needed};
-use crate::config::{
-    load_cli_config, load_workspace_snapshot, read_optional_json, save_cli_config, write_json,
-};
+use crate::client::{SyncHubClient, refresh_cli_config_from_disk};
+use crate::config::{load_cli_config, load_workspace_snapshot, read_optional_json, write_json};
 use crate::models::{SyncAgentControl, SyncAgentState, WorkspaceRegistryEntry};
 use crate::native_sync::execute_sync_once;
 use anyhow::{Context, Result};
@@ -59,9 +57,7 @@ async fn run_cycle(entry: &WorkspaceRegistryEntry, config_path: &Path) {
     update_state(&root, |state| state.status = "running".to_string());
     let result = async {
         let mut login = load_cli_config(config_path)?.context("sign in before starting sync")?;
-        if refresh_cli_config_if_needed(&mut login).await? {
-            save_cli_config(config_path, &login)?;
-        }
+        refresh_cli_config_from_disk(config_path, &mut login).await?;
         let workspace = load_workspace_snapshot(entry.clone());
         let server = workspace.server_url(&login.server_url);
         let client = SyncHubClient::new(server)?;

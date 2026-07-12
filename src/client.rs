@@ -1,3 +1,4 @@
+use crate::config::{load_cli_config, save_cli_config};
 use crate::models::{
     ApiEnvelope, ApiStatus, ChangeListData, CliConfig, CommitUploadData, Device, DeviceListData,
     FileListData, FileNode, FileVersion, FileVersionListData, LoginData, RestoreFileVersionData,
@@ -8,7 +9,11 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
+use tokio::sync::Mutex;
+
+static TOKEN_REFRESH_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[derive(Clone)]
 pub struct SyncHubClient {
@@ -602,8 +607,27 @@ pub async fn refresh_cli_config_if_needed(config: &mut CliConfig) -> Result<bool
     }
     let client = SyncHubClient::new(&config.server_url)?;
     let tokens = client.refresh(&config.tokens.refresh_token).await?;
+    let now = SystemTime::now();
+    config.access_token_expires_at = Some(crate::app::time::rfc3339_from_system_time(
+        tokens.access_token_expires_at(now),
+    ));
+    config.updated_at = Some(crate::app::time::rfc3339_from_system_time(now));
     config.tokens = tokens;
     Ok(true)
+}
+
+pub async fn refresh_cli_config_from_disk(
+    config_path: &Path,
+    config: &mut CliConfig,
+) -> Result<()> {
+    let _guard = TOKEN_REFRESH_LOCK.lock().await;
+    if let Some(saved) = load_cli_config(config_path)? {
+        *config = saved;
+    }
+    if refresh_cli_config_if_needed(config).await? {
+        save_cli_config(config_path, config)?;
+    }
+    Ok(())
 }
 
 pub fn normalize_base_url(base_url: &str) -> String {
@@ -759,6 +783,88 @@ mod tests {
             [0, 1, 2, 3]
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_updates_access_token_expiry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /api/v1/auth/refresh HTTP/1.1"));
+            assert!(request.contains("old-refresh"));
+            let body = r#"{"code":0,"message":"","data":{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let before = SystemTime::now();
+        let mut config = CliConfig {
+            server_url: format!("http://{address}"),
+            tokens: TokenPair {
+                access_token: "old-access".to_string(),
+                refresh_token: "old-refresh".to_string(),
+                expires_in: 1,
+            },
+            access_token_expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+            ..CliConfig::default()
+        };
+
+        assert!(refresh_cli_config_if_needed(&mut config).await.unwrap());
+
+        assert_eq!(config.tokens.access_token, "new-access");
+        assert_eq!(config.tokens.refresh_token, "new-refresh");
+        assert!(
+            parse_rfc3339_utc(config.access_token_expires_at.as_deref().unwrap()).unwrap()
+                > before + Duration::from_secs(3500)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disk_session_replaces_stale_in_memory_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let saved = CliConfig {
+            server_url: "https://sync.example".to_string(),
+            tokens: TokenPair {
+                access_token: "latest-access".to_string(),
+                refresh_token: "latest-refresh".to_string(),
+                expires_in: 3600,
+            },
+            access_token_expires_at: Some(crate::app::time::rfc3339_from_system_time(
+                SystemTime::now() + Duration::from_secs(3600),
+            )),
+            ..CliConfig::default()
+        };
+        save_cli_config(&path, &saved).unwrap();
+        let mut stale = CliConfig {
+            server_url: saved.server_url.clone(),
+            tokens: TokenPair {
+                access_token: "stale-access".to_string(),
+                refresh_token: "stale-refresh".to_string(),
+                expires_in: 0,
+            },
+            access_token_expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+            ..CliConfig::default()
+        };
+
+        refresh_cli_config_from_disk(&path, &mut stale)
+            .await
+            .unwrap();
+
+        assert_eq!(stale, saved);
     }
 
     #[test]
