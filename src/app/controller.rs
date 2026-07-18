@@ -276,6 +276,9 @@ impl SyncHubDesktop {
                         AuthMode::Login => client.login(&email, &password).await?,
                         AuthMode::Register => client.register(&email, &password).await?,
                     };
+                    let api_key = client
+                        .create_desktop_api_key(&data.tokens.access_token)
+                        .await?;
                     let now = SystemTime::now();
                     let cfg = CliConfig {
                         server_url: client.base_url().to_string(),
@@ -285,6 +288,7 @@ impl SyncHubDesktop {
                         )),
                         updated_at: Some(rfc3339_from_system_time(now)),
                         tokens: data.tokens,
+                        api_key,
                     };
                     save_cli_config(&config_path, &cfg)?;
                     Ok::<CliConfig, anyhow::Error>(cfg)
@@ -389,12 +393,7 @@ impl SyncHubDesktop {
                         .unwrap_or_else(|| "/".to_string());
                     let client = SyncHubClient::new(server)?;
                     let data = client
-                        .list_files_for_path(
-                            &config.tokens.access_token,
-                            &remote_path,
-                            100,
-                            cursor.as_deref(),
-                        )
+                        .list_files_for_path(&config.api_key, &remote_path, 100, cursor.as_deref())
                         .await?;
                     Ok::<(CliConfig, FileListData), anyhow::Error>((config, data))
                 }
@@ -465,19 +464,10 @@ impl SyncHubDesktop {
                     let server = workspace.server_url(&config.server_url);
                     let client = SyncHubClient::new(server)?;
                     let node = client
-                        .create_directory(
-                            &config.tokens.access_token,
-                            &remote_path,
-                            Some(device_id.as_str()),
-                        )
+                        .create_directory(&config.api_key, &remote_path, Some(device_id.as_str()))
                         .await?;
                     let files = client
-                        .list_files_for_path(
-                            &config.tokens.access_token,
-                            &workspace.remote_path(),
-                            100,
-                            None,
-                        )
+                        .list_files_for_path(&config.api_key, &workspace.remote_path(), 100, None)
                         .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
                         config,
@@ -545,7 +535,7 @@ impl SyncHubDesktop {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let data = client
-                        .list_file_versions(&config.tokens.access_token, &file.id, 100)
+                        .list_file_versions(&config.api_key, &file.id, 100)
                         .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileVersion>), anyhow::Error>((
                         config, file, data.items,
@@ -597,35 +587,32 @@ impl SyncHubDesktop {
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let mut cx = cx.clone();
             async move {
-                let result =
-                    async {
-                        refresh_cli_config_from_disk(&config_path, &mut config).await?;
-                        let server = workspace.server_url(&config.server_url);
-                        let client = SyncHubClient::new(server)?;
-                        let restored = client
-                            .restore_file_version(
-                                &config.tokens.access_token,
-                                &file.id,
-                                version.version,
-                                Some(device_id.as_str()),
-                            )
-                            .await?;
-                        let versions = client
-                            .list_file_versions(&config.tokens.access_token, &file.id, 100)
-                            .await?;
-                        let files = client
-                            .list_files_for_path(
-                                &config.tokens.access_token,
-                                &workspace.remote_path(),
-                                100,
-                                None,
-                            )
-                            .await?;
-                        Ok::<(CliConfig, FileNode, Vec<FileVersion>, Vec<FileNode>), anyhow::Error>(
-                            (config, restored.file, versions.items, files.items),
+                let result = async {
+                    refresh_cli_config_from_disk(&config_path, &mut config).await?;
+                    let server = workspace.server_url(&config.server_url);
+                    let client = SyncHubClient::new(server)?;
+                    let restored = client
+                        .restore_file_version(
+                            &config.api_key,
+                            &file.id,
+                            version.version,
+                            Some(device_id.as_str()),
                         )
-                    }
-                    .await;
+                        .await?;
+                    let versions = client
+                        .list_file_versions(&config.api_key, &file.id, 100)
+                        .await?;
+                    let files = client
+                        .list_files_for_path(&config.api_key, &workspace.remote_path(), 100, None)
+                        .await?;
+                    Ok::<(CliConfig, FileNode, Vec<FileVersion>, Vec<FileNode>), anyhow::Error>((
+                        config,
+                        restored.file,
+                        versions.items,
+                        files.items,
+                    ))
+                }
+                .await;
                 if let Some(this) = this.upgrade() {
                     let _ = this.update(&mut cx, |this, cx| {
                         this.loading = false;
@@ -682,23 +669,15 @@ impl SyncHubDesktop {
                     let client = SyncHubClient::new(server)?;
                     let updated = if pinned {
                         client
-                            .pin_file_version(
-                                &config.tokens.access_token,
-                                &file.id,
-                                version.version,
-                            )
+                            .pin_file_version(&config.api_key, &file.id, version.version)
                             .await?
                     } else {
                         client
-                            .unpin_file_version(
-                                &config.tokens.access_token,
-                                &file.id,
-                                version.version,
-                            )
+                            .unpin_file_version(&config.api_key, &file.id, version.version)
                             .await?
                     };
                     let versions = client
-                        .list_file_versions(&config.tokens.access_token, &file.id, 100)
+                        .list_file_versions(&config.api_key, &file.id, 100)
                         .await?;
                     Ok::<(CliConfig, FileVersion, Vec<FileVersion>), anyhow::Error>((
                         config,
@@ -752,19 +731,10 @@ impl SyncHubDesktop {
                     let server = workspace.server_url(&config.server_url);
                     let client = SyncHubClient::new(server)?;
                     client
-                        .delete_file(
-                            &config.tokens.access_token,
-                            &file.id,
-                            Some(device_id.as_str()),
-                        )
+                        .delete_file(&config.api_key, &file.id, Some(device_id.as_str()))
                         .await?;
                     let files = client
-                        .list_files_for_path(
-                            &config.tokens.access_token,
-                            &workspace.remote_path(),
-                            100,
-                            None,
-                        )
+                        .list_files_for_path(&config.api_key, &workspace.remote_path(), 100, None)
                         .await?;
                     Ok::<(CliConfig, FileNode, Vec<FileNode>), anyhow::Error>((
                         config,
@@ -831,19 +801,14 @@ impl SyncHubDesktop {
                     let client = SyncHubClient::new(server)?;
                     let moved = client
                         .move_file(
-                            &config.tokens.access_token,
+                            &config.api_key,
                             &file.id,
                             &target_path,
                             Some(device_id.as_str()),
                         )
                         .await?;
                     let files = client
-                        .list_files_for_path(
-                            &config.tokens.access_token,
-                            &workspace.remote_path(),
-                            100,
-                            None,
-                        )
+                        .list_files_for_path(&config.api_key, &workspace.remote_path(), 100, None)
                         .await?;
                     Ok::<(CliConfig, FileNode, FileNode, Vec<FileNode>), anyhow::Error>((
                         config,
@@ -909,7 +874,7 @@ impl SyncHubDesktop {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let target = local_path_for_remote(&workspace_root, &remote_root, &file.path)?;
                     let content = SyncHubClient::new(server)?
-                        .download_file(&config.tokens.access_token, &file.id)
+                        .download_file(&config.api_key, &file.id)
                         .await?;
                     let (target, bytes) = tokio::task::spawn_blocking(move || {
                         write_downloaded_file(&target, &content).map(|bytes| (target, bytes))
@@ -1020,7 +985,7 @@ impl SyncHubDesktop {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let trash = client
-                        .list_trash(&config.tokens.access_token)
+                        .list_trash(&config.api_key)
                         .await?
                         .into_iter()
                         .filter(|file| file_belongs_to_remote_root(&file.path, &remote_root))
@@ -1071,14 +1036,10 @@ impl SyncHubDesktop {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
                     let restored = client
-                        .restore_trash(
-                            &config.tokens.access_token,
-                            &file.id,
-                            Some(device_id.as_str()),
-                        )
+                        .restore_trash(&config.api_key, &file.id, Some(device_id.as_str()))
                         .await?;
                     let trash = client
-                        .list_trash(&config.tokens.access_token)
+                        .list_trash(&config.api_key)
                         .await?
                         .into_iter()
                         .filter(|item| file_belongs_to_remote_root(&item.path, &remote_root))
@@ -1171,9 +1132,7 @@ impl SyncHubDesktop {
                 let result = async {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(&config.server_url)?;
-                    let data = client
-                        .list_conflicts(&config.tokens.access_token, 100)
-                        .await?;
+                    let data = client.list_conflicts(&config.api_key, 100).await?;
                     Ok::<(CliConfig, Vec<SyncConflict>), anyhow::Error>((config, data.items))
                 }
                 .await;
@@ -1213,9 +1172,7 @@ impl SyncHubDesktop {
                 let result = async {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
-                    let data = client
-                        .list_devices(&config.tokens.access_token, 100)
-                        .await?;
+                    let data = client.list_devices(&config.api_key, 100).await?;
                     Ok::<(CliConfig, Vec<Device>), anyhow::Error>((config, data.items))
                 }
                 .await;
@@ -1257,11 +1214,9 @@ impl SyncHubDesktop {
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(&config.server_url)?;
                     let resolved = client
-                        .resolve_conflict(&config.tokens.access_token, &conflict_id, resolution)
+                        .resolve_conflict(&config.api_key, &conflict_id, resolution)
                         .await?;
-                    let conflicts = client
-                        .list_conflicts(&config.tokens.access_token, 100)
-                        .await?;
+                    let conflicts = client.list_conflicts(&config.api_key, 100).await?;
                     Ok::<(CliConfig, SyncConflict, Vec<SyncConflict>), anyhow::Error>((
                         config,
                         resolved,
@@ -1390,8 +1345,7 @@ impl SyncHubDesktop {
                         .ok_or_else(|| anyhow::anyhow!("this workspace is already syncing"))?;
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
-                    let pushed =
-                        execute_push(&client, &config.tokens.access_token, &workspace).await?;
+                    let pushed = execute_push(&client, &config.api_key, &workspace).await?;
                     Ok::<_, anyhow::Error>((config, pushed))
                 }
                 .await;
@@ -1450,8 +1404,7 @@ impl SyncHubDesktop {
                         .ok_or_else(|| anyhow::anyhow!("this workspace is already syncing"))?;
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
-                    let pulled =
-                        execute_pull(&client, &config.tokens.access_token, &workspace).await?;
+                    let pulled = execute_pull(&client, &config.api_key, &workspace).await?;
                     Ok::<_, anyhow::Error>((config, pulled))
                 }
                 .await;
@@ -1513,8 +1466,7 @@ impl SyncHubDesktop {
                         .ok_or_else(|| anyhow::anyhow!("this workspace is already syncing"))?;
                     refresh_cli_config_from_disk(&config_path, &mut config).await?;
                     let client = SyncHubClient::new(server)?;
-                    let synced =
-                        execute_sync_once(&client, &config.tokens.access_token, &workspace).await?;
+                    let synced = execute_sync_once(&client, &config.api_key, &workspace).await?;
                     Ok::<_, anyhow::Error>((config, synced))
                 }
                 .await;

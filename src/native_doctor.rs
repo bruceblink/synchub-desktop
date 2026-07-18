@@ -88,13 +88,17 @@ pub async fn run_doctor(
             .unwrap_or_else(|| workspace.workspace_config_path().display().to_string()),
     });
     report.checks.push(DoctorCheck {
-        status: if login.tokens.access_token.trim().is_empty() {
+        status: if login.api_key.trim().is_empty() {
             DoctorStatus::Fail
         } else {
             DoctorStatus::Ok
         },
-        name: "Sign in",
-        detail: login.user.email.clone(),
+        name: "API key",
+        detail: if login.api_key.trim().is_empty() {
+            "missing desktop API key".to_string()
+        } else {
+            login.user.email.clone()
+        },
     });
 
     match client.ready().await {
@@ -125,7 +129,7 @@ pub async fn run_doctor(
             detail: "not registered; Sync Once will register it".to_string(),
         });
     } else {
-        match client.list_devices(&login.tokens.access_token, 500).await {
+        match client.list_devices(&login.api_key, 500).await {
             Ok(devices) if devices.items.iter().any(|device| device.id == device_id) => {
                 report.checks.push(DoctorCheck {
                     status: DoctorStatus::Ok,

@@ -50,6 +50,11 @@ pub struct LoginData {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CreatedApiKeyData {
+    pub secret: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct ApiEnvelope<T> {
     pub code: serde_json::Value,
     pub message: String,
@@ -62,6 +67,8 @@ pub struct CliConfig {
     pub user: User,
     pub tokens: TokenPair,
     pub access_token_expires_at: Option<String>,
+    #[serde(default)]
+    pub api_key: String,
     pub updated_at: Option<String>,
 }
 

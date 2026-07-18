@@ -1,9 +1,9 @@
 use crate::config::{load_cli_config, save_cli_config};
 use crate::models::{
-    ApiEnvelope, ApiStatus, ChangeListData, CliConfig, CommitUploadData, Device, DeviceListData,
-    FileListData, FileNode, FileVersion, FileVersionListData, LoginData, RestoreFileVersionData,
-    SyncConflict, SyncConflictListData, TokenPair, UploadChunk, UploadSession, VersionInfo,
-    is_success_code,
+    ApiEnvelope, ApiStatus, ChangeListData, CliConfig, CommitUploadData, CreatedApiKeyData, Device,
+    DeviceListData, FileListData, FileNode, FileVersion, FileVersionListData, LoginData,
+    RestoreFileVersionData, SyncConflict, SyncConflictListData, TokenPair, UploadChunk,
+    UploadSession, VersionInfo, is_success_code,
 };
 use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, Method};
@@ -95,6 +95,23 @@ impl SyncHubClient {
         .await
     }
 
+    pub async fn create_desktop_api_key(&self, access_token: &str) -> Result<String> {
+        let url = endpoint(&self.base_url, "/api/v1/account/api-keys");
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(access_token)
+            .json(&json!({ "name": "SyncHub Desktop", "application": "synchub-desktop" }))
+            .send()
+            .await
+            .context("create desktop api key")?;
+        let data: CreatedApiKeyData = decode_json_response(response).await?;
+        if data.secret.trim().is_empty() {
+            return Err(anyhow!("desktop api key was empty"));
+        }
+        Ok(data.secret)
+    }
+
     pub async fn get_file_by_path(&self, access_token: &str, path: &str) -> Result<FileNode> {
         let path = file_by_path_endpoint(path);
         self.request_json(Method::GET, &path, Some(access_token), None)
@@ -106,7 +123,7 @@ impl SyncHubClient {
         let response = self
             .client
             .get(endpoint(&self.base_url, &path))
-            .bearer_auth(access_token)
+            .header("X-API-Key", access_token)
             .send()
             .await
             .context("download remote file")?;
@@ -254,7 +271,7 @@ impl SyncHubClient {
         let response = self
             .client
             .post(url)
-            .bearer_auth(access_token)
+            .header("X-API-Key", access_token)
             .header("Idempotency-Key", idempotency_key)
             .json(&body)
             .send()
@@ -275,7 +292,7 @@ impl SyncHubClient {
         let response = self
             .client
             .put(endpoint(&self.base_url, &path))
-            .bearer_auth(access_token)
+            .header("X-API-Key", access_token)
             .header("Content-Type", "application/octet-stream")
             .header("X-Chunk-Sha256", sha256)
             .body(content)
@@ -509,7 +526,7 @@ impl SyncHubClient {
         let url = endpoint(&self.base_url, path);
         let mut request = self.client.request(method, url);
         if let Some(token) = access_token.filter(|token| !token.trim().is_empty()) {
-            request = request.bearer_auth(token);
+            request = request.header("X-API-Key", token);
         }
         if let Some(body) = body {
             request = request.json(&body);
@@ -540,7 +557,7 @@ impl SyncHubClient {
         let url = endpoint(&self.base_url, path);
         let mut request = self.client.request(method, url);
         if let Some(token) = access_token.filter(|token| !token.trim().is_empty()) {
-            request = request.bearer_auth(token);
+            request = request.header("X-API-Key", token);
         }
         if let Some(body) = body {
             request = request.json(&body);
@@ -624,7 +641,15 @@ pub async fn refresh_cli_config_from_disk(
     if let Some(saved) = load_cli_config(config_path)? {
         *config = saved;
     }
-    if refresh_cli_config_if_needed(config).await? {
+    let mut changed = refresh_cli_config_if_needed(config).await?;
+    if config.api_key.trim().is_empty() {
+        let client = SyncHubClient::new(&config.server_url)?;
+        config.api_key = client
+            .create_desktop_api_key(&config.tokens.access_token)
+            .await?;
+        changed = true;
+    }
+    if changed {
         save_cli_config(config_path, config)?;
     }
     Ok(())
@@ -757,7 +782,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downloads_binary_file_with_bearer_auth() {
+    async fn downloads_binary_file_with_api_key() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -766,11 +791,7 @@ mod tests {
             let read = stream.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
             assert!(request.starts_with("GET /api/v1/files/file%201/content HTTP/1.1"));
-            assert!(
-                request
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer token-1")
-            );
+            assert!(request.to_ascii_lowercase().contains("x-api-key: key-1"));
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n\x00\x01\x02\x03")
                 .await
@@ -779,7 +800,7 @@ mod tests {
 
         let client = SyncHubClient::new(format!("http://{address}")).unwrap();
         assert_eq!(
-            client.download_file("token-1", "file 1").await.unwrap(),
+            client.download_file("key-1", "file 1").await.unwrap(),
             [0, 1, 2, 3]
         );
         server.await.unwrap();
@@ -838,6 +859,7 @@ mod tests {
         let path = directory.path().join("config.json");
         let saved = CliConfig {
             server_url: "https://sync.example".to_string(),
+            api_key: "sk_desktop_saved".to_string(),
             tokens: TokenPair {
                 access_token: "latest-access".to_string(),
                 refresh_token: "latest-refresh".to_string(),
@@ -865,6 +887,61 @@ mod tests {
             .unwrap();
 
         assert_eq!(stale, saved);
+    }
+
+    #[tokio::test]
+    async fn disk_session_mints_and_persists_api_key_for_legacy_login() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /api/v1/account/api-keys HTTP/1.1"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer legacy-access")
+            );
+            assert!(request.contains("synchub-desktop"));
+            let body = r#"{"code":0,"message":"","data":{"secret":"sk_desktop_created"}}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let saved = CliConfig {
+            server_url: format!("http://{address}"),
+            tokens: TokenPair {
+                access_token: "legacy-access".to_string(),
+                refresh_token: "legacy-refresh".to_string(),
+                expires_in: 3600,
+            },
+            access_token_expires_at: Some(crate::app::time::rfc3339_from_system_time(
+                SystemTime::now() + Duration::from_secs(3600),
+            )),
+            ..CliConfig::default()
+        };
+        save_cli_config(&path, &saved).unwrap();
+        let mut config = saved;
+
+        refresh_cli_config_from_disk(&path, &mut config)
+            .await
+            .unwrap();
+
+        assert_eq!(config.api_key, "sk_desktop_created");
+        assert_eq!(load_cli_config(&path).unwrap(), Some(config));
+        server.await.unwrap();
     }
 
     #[test]

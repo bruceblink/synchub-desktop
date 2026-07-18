@@ -65,7 +65,7 @@ async fn run_cycle(entry: &WorkspaceRegistryEntry, config_path: &Path) {
         let workspace = load_workspace_snapshot(entry.clone());
         let server = workspace.server_url(&login.server_url);
         let client = SyncHubClient::new(server)?;
-        execute_sync_once(&client, &login.tokens.access_token, &workspace).await?;
+        execute_sync_once(&client, &login.api_key, &workspace).await?;
         Ok::<_, anyhow::Error>(())
     }
     .await;
